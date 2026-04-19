@@ -15,4 +15,4 @@ categories = ["multimedia"]
 
 [dependencies]
 oxideav-core = "0.1"
-oxideav-container = "0.0"
+oxideav-container = "0.1"
