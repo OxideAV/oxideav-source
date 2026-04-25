@@ -1,6 +1,6 @@
 # oxideav-source
 
-Generic source registry: opens URIs (file://, future http://) into Read+Seek; prefetch buffer wrapper
+Generic source registry: opens URIs (file://, plus http:// via [oxideav-http](https://github.com/OxideAV/oxideav-http)) into Read+Seek; prefetch buffer wrapper
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework — a
 100% pure Rust media transcoding and streaming stack. No C libraries, no FFI

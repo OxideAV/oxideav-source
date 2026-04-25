@@ -6,7 +6,7 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-source"
 authors = ["Mark Karpeles"]
-description = "Generic source registry: opens URIs (file://, future http://) into Read+Seek; prefetch buffer wrapper"
+description = "Generic source registry: opens URIs (file://, plus http:// via oxideav-http) into Read+Seek; prefetch buffer wrapper"
 
 readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-source"
