@@ -6,7 +6,7 @@ use oxideav_source::SourceRegistry;
 
 #[test]
 fn open_bare_path_reads_first_bytes() {
-    let reg = SourceRegistry::with_defaults();
+    let reg = oxideav_source::with_defaults();
     let mut f = reg.open("Cargo.toml").expect("open");
     let mut head = [0u8; 4];
     f.read_exact(&mut head).expect("read");
@@ -15,7 +15,7 @@ fn open_bare_path_reads_first_bytes() {
 
 #[test]
 fn open_file_url_reads_first_bytes() {
-    let reg = SourceRegistry::with_defaults();
+    let reg = oxideav_source::with_defaults();
     let cwd = std::env::current_dir().unwrap();
     let url = format!("file://{}/Cargo.toml", cwd.display());
     let mut f = reg.open(&url).expect("open");
@@ -26,7 +26,7 @@ fn open_file_url_reads_first_bytes() {
 
 #[test]
 fn open_supports_seek() {
-    let reg = SourceRegistry::with_defaults();
+    let reg = oxideav_source::with_defaults();
     let mut f = reg.open("Cargo.toml").unwrap();
     let end = f.seek(SeekFrom::End(0)).unwrap();
     assert!(end > 0);

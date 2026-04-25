@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use oxideav_container::ReadSeek;
+use oxideav_core::ReadSeek;
 
 /// Worker reads at most this many bytes per `inner.read` call.
 const BLOCK: usize = 256 * 1024;

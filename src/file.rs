@@ -2,8 +2,7 @@
 
 use std::fs::File;
 
-use oxideav_container::ReadSeek;
-use oxideav_core::{Error, Result};
+use oxideav_core::{Error, ReadSeek, Result};
 
 use crate::uri;
 
