@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/OxideAV/oxideav-source/compare/v0.1.2...v0.1.3) - 2026-05-02
+
+### Other
+
+- stay on 0.1.x during heavy dev (semver_check=false)
+- Migrate file:// driver to SourceRegistry typed-bytes API
+- pin release-plz to patch-only bumps
+
 ### Changed
 
 - **Breaking**: Migrated to the new typed `SourceRegistry` API in
