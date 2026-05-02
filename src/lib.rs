@@ -2,20 +2,22 @@
 //! built-in `file://` driver and a prefetching `BufferedSource`
 //! wrapper.
 //!
-//! `SourceRegistry`, `OpenSourceFn`, and `ReadSeek` now live in
-//! `oxideav-core` (so the unified `RuntimeContext` can hold the source
-//! registry alongside codec / container / filter). This crate retains
-//! the concrete `file://` driver and the `BufferedSource` helper that
-//! `oxideav-http` and the player rely on; it also exposes a
-//! [`with_defaults`] free function that pre-populates a registry with
-//! the file driver, matching the historical surface.
+//! `SourceRegistry`, the typed source traits ([`BytesSource`],
+//! [`PacketSource`], [`FrameSource`]), and the [`SourceOutput`] enum
+//! live in `oxideav-core`. This crate retains the concrete `file://`
+//! driver and the `BufferedSource` helper that `oxideav-http` and the
+//! player rely on; it also exposes a [`with_defaults`] free function
+//! that pre-populates a registry with the file driver, matching the
+//! historical surface.
 //!
 //! ```no_run
 //! let reg = oxideav_source::with_defaults();
 //! let _input = reg.open("/tmp/video.mp4").unwrap();
 //! ```
 
-pub use oxideav_core::{OpenSourceFn, ReadSeek, SourceRegistry};
+pub use oxideav_core::{
+    BytesSource, FrameSource, PacketSource, ReadSeek, SourceOutput, SourceRegistry,
+};
 
 mod buffered;
 mod file;
@@ -29,7 +31,7 @@ pub use file::open_file;
 /// registry's fall-back behaviour.
 pub fn with_defaults() -> SourceRegistry {
     let mut r = SourceRegistry::new();
-    r.register("file", open_file);
+    r.register_bytes("file", open_file);
     r
 }
 
@@ -37,5 +39,5 @@ pub fn with_defaults() -> SourceRegistry {
 /// runtime context. Idempotent — replacing a prior registration of the
 /// `file` scheme.
 pub fn register(ctx: &mut oxideav_core::RuntimeContext) {
-    ctx.sources.register("file", open_file);
+    ctx.sources.register_bytes("file", open_file);
 }

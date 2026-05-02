@@ -2,15 +2,15 @@
 
 use std::fs::File;
 
-use oxideav_core::{Error, ReadSeek, Result};
+use oxideav_core::{BytesSource, Error, Result};
 
 use crate::uri;
 
-/// Open a local file as a `Box<dyn ReadSeek>`. Accepts:
+/// Open a local file as a `Box<dyn BytesSource>`. Accepts:
 /// - bare paths: `/abs/path`, `rel/path`, `Cargo.toml`
 /// - `file:///abs/path`
 /// - `file:relative`
-pub fn open_file(uri_str: &str) -> Result<Box<dyn ReadSeek>> {
+pub fn open_file(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
     if scheme != "file" {
         return Err(Error::invalid(format!(
