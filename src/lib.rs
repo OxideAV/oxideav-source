@@ -41,3 +41,5 @@ pub fn with_defaults() -> SourceRegistry {
 pub fn register(ctx: &mut oxideav_core::RuntimeContext) {
     ctx.sources.register_bytes("file", open_file);
 }
+
+oxideav_core::register!("source", register);
