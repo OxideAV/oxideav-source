@@ -8,9 +8,7 @@ sources slot into the same opener API. The `file://` driver registers
 as a `BytesSource` and the `with_defaults()` helper continues to
 return a registry pre-populated with it.
 
-Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework — a
-100% pure Rust media transcoding and streaming stack. No C libraries, no FFI
-wrappers, no `*-sys` crates.
+Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework — a pure-Rust media transcoding and streaming stack. Codec, container, and filter crates are implemented from the spec (no C codec libraries linked or wrapped, no `*-sys` crates). Optional hardware-engine crates (`oxideav-videotoolbox` / `-audiotoolbox` / `-vaapi` / `-vdpau` / `-nvidia` / `-vulkan-video`) bridge to OS APIs via runtime `libloading`; pass `--no-hwaccel` (or omit the `hwaccel` feature) to opt out.
 
 ## Usage
 
