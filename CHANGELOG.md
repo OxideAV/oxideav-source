@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `mem://<id>` scheme — in-memory buffer registry (`mem::put` / `mem::remove` / `mem::clear`) and `open_mem` opener. `with_defaults()` now installs both the `file` and `mem` drivers.
+- `FileScope` — directory allow-list for the `file://` driver. Resolves
+  requests through `std::fs::canonicalize` (defeats `../` traversal via
+  symlinks), then rejects anything outside the canonicalised allow-list
+  with component-aware prefix matching. Install with
+  `FileScope::register_into(&mut SourceRegistry)`.
+
+### Changed
+
+- `BufferedSource::read` uses `VecDeque::as_slices` + `copy_from_slice`
+  for the ring → out copy instead of an element-wise loop, so a
+  million-byte hit no longer iterates byte-by-byte under the lock.
+- `register()` now installs both `file` and `mem` drivers into the
+  passed `RuntimeContext`.
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-source/compare/v0.1.3...v0.1.4) - 2026-05-06
 
 ### Other

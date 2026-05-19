@@ -1,19 +1,27 @@
 //! Source registry shim — `oxideav_core::SourceRegistry` plus the
-//! built-in `file://` driver and a prefetching `BufferedSource`
-//! wrapper.
+//! built-in `file://` and `mem://` drivers and a prefetching
+//! `BufferedSource` wrapper.
 //!
 //! `SourceRegistry`, the typed source traits ([`BytesSource`],
 //! [`PacketSource`], [`FrameSource`]), and the [`SourceOutput`] enum
-//! live in `oxideav-core`. This crate retains the concrete `file://`
-//! driver and the `BufferedSource` helper that `oxideav-http` and the
-//! player rely on; it also exposes a [`with_defaults`] free function
-//! that pre-populates a registry with the file driver, matching the
+//! live in `oxideav-core`. This crate retains the concrete drivers and
+//! the `BufferedSource` helper that `oxideav-http` and the player rely
+//! on; it also exposes a [`with_defaults`] free function that
+//! pre-populates a registry with the bundled drivers, matching the
 //! historical surface.
 //!
 //! ```no_run
 //! let reg = oxideav_source::with_defaults();
 //! let _input = reg.open("/tmp/video.mp4").unwrap();
 //! ```
+//!
+//! ## Schemes
+//!
+//! - **`file://<path>`** and bare paths — local filesystem. Default
+//!   opener is unscoped; install a [`FileScope`] via
+//!   [`FileScope::register_into`] to restrict by directory allow-list.
+//! - **`mem://<id>`** — process-global in-memory buffer; register a
+//!   payload with [`mem::put`].
 
 pub use oxideav_core::{
     BytesSource, FrameSource, PacketSource, ReadSeek, SourceOutput, SourceRegistry,
@@ -21,25 +29,31 @@ pub use oxideav_core::{
 
 mod buffered;
 mod file;
+pub mod mem;
+mod scope;
 mod uri;
 
 pub use buffered::BufferedSource;
 pub use file::open_file;
+pub use mem::open_mem;
+pub use scope::{open_file_scoped, FileScope};
 
 /// Build a [`SourceRegistry`] pre-populated with the built-in `file`
-/// driver. Bare paths (without a scheme) also dispatch to it via the
-/// registry's fall-back behaviour.
+/// and `mem` drivers. Bare paths (without a scheme) dispatch to the
+/// `file` driver via the registry's fall-back behaviour.
 pub fn with_defaults() -> SourceRegistry {
     let mut r = SourceRegistry::new();
     r.register_bytes("file", open_file);
+    r.register_bytes("mem", open_mem);
     r
 }
 
-/// Install the `file://` (and bare-path) source driver into the given
-/// runtime context. Idempotent — replacing a prior registration of the
-/// `file` scheme.
+/// Install the bundled source drivers (`file://`, bare paths, `mem://`)
+/// into the given runtime context. Idempotent — replacing any prior
+/// registration of those schemes.
 pub fn register(ctx: &mut oxideav_core::RuntimeContext) {
     ctx.sources.register_bytes("file", open_file);
+    ctx.sources.register_bytes("mem", open_mem);
 }
 
 oxideav_core::register!("source", register);

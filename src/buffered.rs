@@ -202,12 +202,23 @@ impl Read for BufferedSource {
                 ));
             }
             if rel < st.buf.len() {
-                // Hit. Copy out.
+                // Hit. Copy out using the VecDeque's two contiguous
+                // slices — this is `copy_from_slice` per segment, vastly
+                // faster than an element-wise loop on a million-byte ring.
                 let avail = st.buf.len() - rel;
                 let n = avail.min(out.len());
-                // VecDeque slice view via into-iterator — copy element-wise.
-                for (i, byte) in st.buf.iter().skip(rel).take(n).enumerate() {
-                    out[i] = *byte;
+                let (front, back) = st.buf.as_slices();
+                if rel < front.len() {
+                    let f_off = rel;
+                    let f_take = (front.len() - f_off).min(n);
+                    out[..f_take].copy_from_slice(&front[f_off..f_off + f_take]);
+                    if f_take < n {
+                        let b_take = n - f_take;
+                        out[f_take..n].copy_from_slice(&back[..b_take]);
+                    }
+                } else {
+                    let b_off = rel - front.len();
+                    out[..n].copy_from_slice(&back[b_off..b_off + n]);
                 }
                 self.pos += n as u64;
                 // If we've consumed past the front of the ring, drop those
