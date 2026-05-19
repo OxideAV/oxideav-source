@@ -37,6 +37,12 @@ pub struct FileScope {
     /// its canonical form starts with one of these roots (path-component
     /// prefix match, not byte-prefix).
     roots: Vec<PathBuf>,
+    /// If true, every canonicalisable path is admitted (the `roots`
+    /// list is consulted only on `is_allowed`, which always returns
+    /// true while this flag is set). Used by [`permissive`](Self::permissive)
+    /// to cross-platform represent "no restriction" without baking in a
+    /// Unix-style `/` root that does not match Windows canonical paths.
+    permissive: bool,
 }
 
 impl FileScope {
@@ -47,10 +53,13 @@ impl FileScope {
     }
 
     /// A scope that permits everything the process can read. Equivalent
-    /// to the default [`open_file`](crate::open_file) behaviour.
+    /// to the default [`open_file`](crate::open_file) behaviour. Useful
+    /// where the registry plumbing expects a `FileScope` but the caller
+    /// has no security policy to enforce.
     pub fn permissive() -> Self {
         Self {
-            roots: vec![PathBuf::from("/")],
+            roots: Vec::new(),
+            permissive: true,
         }
     }
 
@@ -93,8 +102,11 @@ impl FileScope {
 
     /// True iff `canon` lies under at least one allow-listed root,
     /// matched on path components (not bytewise — `/foo` does not
-    /// permit `/foobar`).
+    /// permit `/foobar`). A `permissive` scope always returns true.
     fn is_allowed(&self, canon: &Path) -> bool {
+        if self.permissive {
+            return true;
+        }
         self.roots
             .iter()
             .any(|root| under_root(root.as_path(), canon))
