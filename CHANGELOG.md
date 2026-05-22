@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `data:[<mediatype>][;base64],<bytes>` scheme — RFC 2397 inline byte
+  literals decoded directly from the URI (no filesystem access).
+  `open_data` returns a `Cursor`-backed `BytesSource`; `parse_data_uri`
+  surfaces the parsed `DataUri { mediatype, base64, data }` for callers
+  that need to route on media type. `with_defaults()` and `register()`
+  now install the `data` driver alongside `file` and `mem`. Percent
+  decoding is default; the `;base64` marker (case-insensitive) switches
+  to RFC 4648 §4 base64 with internal whitespace tolerated.
 - `mem://<id>` scheme — in-memory buffer registry (`mem::put` / `mem::remove` / `mem::clear`) and `open_mem` opener. `with_defaults()` now installs both the `file` and `mem` drivers.
 - `FileScope` — directory allow-list for the `file://` driver. Resolves
   requests through `std::fs::canonicalize` (defeats `../` traversal via
