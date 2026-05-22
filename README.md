@@ -15,11 +15,13 @@ slot into the same opener API.
 | `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list; blocks `..` traversals through symlinks |
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
+| `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated `file://` segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Empty segments rejected. |
 | `http://`, `https://` | provided by [oxideav-http](https://github.com/OxideAV/oxideav-http) | registered separately by that crate |
 
-`with_defaults()` pre-populates a registry with the `file`, `mem`, and
-`data` drivers (the `file` opener in its unscoped form). For server-side
-use, build an empty registry and install a `FileScope` instead:
+`with_defaults()` pre-populates a registry with the `file`, `mem`,
+`data`, and `concat` drivers (the `file` opener in its unscoped form).
+For server-side use, build an empty registry and install a `FileScope`
+instead:
 
 ```rust,no_run
 use oxideav_source::{FileScope, SourceRegistry};

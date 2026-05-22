@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `concat:<a>|<b>|…` scheme — concatenate several `file://` segments into
+  one seekable `BytesSource`. `open_concat` opens each `|`-separated
+  segment with the `file` driver (bare paths and `file://` URLs both
+  accepted), captures each segment length at open time, and presents the
+  composite over the virtual address space `[0, total_len)`: `Read`
+  walks segment boundaries transparently and `Seek`
+  (`Start`/`End`/`Current`) resolves an absolute offset into the right
+  segment. Empty segments (`a||b`, trailing `|`) and an empty payload
+  are rejected. `with_defaults()` and `register()` now install the
+  `concat` driver alongside `file`, `mem`, and `data`.
 - `data:[<mediatype>][;base64],<bytes>` scheme — RFC 2397 inline byte
   literals decoded directly from the URI (no filesystem access).
   `open_data` returns a `Cursor`-backed `BytesSource`; `parse_data_uri`

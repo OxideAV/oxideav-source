@@ -1,6 +1,6 @@
 //! Source registry shim — `oxideav_core::SourceRegistry` plus the
-//! built-in `file://`, `mem://`, and `data:` drivers and a prefetching
-//! `BufferedSource` wrapper.
+//! built-in `file://`, `mem://`, `data:`, and `concat:` drivers and a
+//! prefetching `BufferedSource` wrapper.
 //!
 //! `SourceRegistry`, the typed source traits ([`BytesSource`],
 //! [`PacketSource`], [`FrameSource`]), and the [`SourceOutput`] enum
@@ -25,12 +25,16 @@
 //! - **`data:[<mediatype>][;base64],<bytes>`** — RFC 2397 inline byte
 //!   literals; payload is decoded directly from the URI with no
 //!   filesystem access.
+//! - **`concat:<a>|<b>|…`** — concatenate several `file://` segments into
+//!   one seekable byte stream (de-facto `concat:` shape; no on-wire
+//!   spec).
 
 pub use oxideav_core::{
     BytesSource, FrameSource, PacketSource, ReadSeek, SourceOutput, SourceRegistry,
 };
 
 mod buffered;
+mod concat;
 pub mod data;
 mod file;
 pub mod mem;
@@ -38,29 +42,32 @@ mod scope;
 mod uri;
 
 pub use buffered::BufferedSource;
+pub use concat::open_concat;
 pub use data::{open_data, parse as parse_data_uri, DataUri};
 pub use file::open_file;
 pub use mem::open_mem;
 pub use scope::{open_file_scoped, FileScope};
 
 /// Build a [`SourceRegistry`] pre-populated with the built-in `file`,
-/// `mem`, and `data` drivers. Bare paths (without a scheme) dispatch
-/// to the `file` driver via the registry's fall-back behaviour.
+/// `mem`, `data`, and `concat` drivers. Bare paths (without a scheme)
+/// dispatch to the `file` driver via the registry's fall-back behaviour.
 pub fn with_defaults() -> SourceRegistry {
     let mut r = SourceRegistry::new();
     r.register_bytes("file", open_file);
     r.register_bytes("mem", open_mem);
     r.register_bytes("data", open_data);
+    r.register_bytes("concat", open_concat);
     r
 }
 
 /// Install the bundled source drivers (`file://`, bare paths, `mem://`,
-/// `data:`) into the given runtime context. Idempotent — replacing any
-/// prior registration of those schemes.
+/// `data:`, `concat:`) into the given runtime context. Idempotent —
+/// replacing any prior registration of those schemes.
 pub fn register(ctx: &mut oxideav_core::RuntimeContext) {
     ctx.sources.register_bytes("file", open_file);
     ctx.sources.register_bytes("mem", open_mem);
     ctx.sources.register_bytes("data", open_data);
+    ctx.sources.register_bytes("concat", open_concat);
 }
 
 oxideav_core::register!("source", register);
