@@ -42,6 +42,32 @@ handled without re-reading the inner source; seeks past the ring restart
 prefetch at the new position. Reader-side reads block on the worker for
 at most 30 s before surfacing `TimedOut`.
 
+## SubSource — windowed view
+
+`SubSource` re-projects a slice `[base, base + len)` of an inner
+`BytesSource` onto `[0, len)` so containers can hand a codec a stream
+that looks like the codec's own sample. This is the seekable analogue
+of `std::io::Read::take`: `take` only caps forward reads, but a codec
+that needs to seek backwards within its window — e.g. to re-read a
+header it just probed — needs a real windowed seek too. The
+[`stream_len`] helper probes a source's total length non-destructively
+(useful at `SubSource::new`-time and anywhere else a length probe is
+needed without disturbing the cursor).
+
+```rust,no_run
+use oxideav_source::{with_defaults, SourceOutput, SubSource};
+
+let reg = with_defaults();
+let inner = match reg.open("/some/container.mp4").unwrap() {
+    SourceOutput::Bytes(b) => b,
+    _ => panic!("expected Bytes"),
+};
+// Hand the codec just the mdat sample at offset 4_321_000, length 34_112.
+let mut sample = SubSource::new(inner, 4_321_000, 34_112).unwrap();
+// `sample` now behaves like a `Read + Seek` source over [0, 34_112).
+# let _ = &mut sample;
+```
+
 ## Status
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)

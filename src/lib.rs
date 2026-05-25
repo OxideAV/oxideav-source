@@ -39,6 +39,7 @@ pub mod data;
 mod file;
 pub mod mem;
 mod scope;
+mod sub;
 mod uri;
 
 pub use buffered::BufferedSource;
@@ -47,6 +48,7 @@ pub use data::{open_data, parse as parse_data_uri, DataUri};
 pub use file::open_file;
 pub use mem::open_mem;
 pub use scope::{open_file_scoped, FileScope};
+pub use sub::{stream_len, SubSource};
 
 /// Build a [`SourceRegistry`] pre-populated with the built-in `file`,
 /// `mem`, `data`, and `concat` drivers. Bare paths (without a scheme)

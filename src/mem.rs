@@ -17,7 +17,7 @@
 //! available for future use).
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use oxideav_core::{BytesSource, Error, Result};
@@ -55,8 +55,13 @@ pub fn clear() {
 }
 
 /// Open a `mem://<id>` URI as a [`BytesSource`]. Each open returns an
-/// independent `Cursor` view over the shared buffer; readers and seekers
-/// do not interfere.
+/// independent reader over the **same** shared buffer — no per-open
+/// copy. Readers and seekers do not interfere with each other because
+/// each `MemReader` owns its own position, while the bytes themselves
+/// are reference-counted via [`Arc`]. Large `mem://` buffers (e.g.
+/// pre-loaded test fixtures or in-memory transcode roundtrip targets)
+/// therefore cost a single `Arc` clone per `open` instead of a full
+/// `Vec<u8>` copy.
 pub fn open_mem(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
     if scheme != "mem" {
@@ -77,11 +82,66 @@ pub fn open_mem(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let buf = guard
         .get(id)
         .ok_or_else(|| Error::invalid(format!("mem:// id '{id}' is not registered")))?;
-    // Clone the Arc, then take an owned copy of the bytes for the Cursor.
-    // Buffers are typically small (test fixtures); we trade a copy for
-    // simpler ownership than wrapping Arc<Vec<u8>> in a Read/Seek impl.
-    let bytes: Vec<u8> = (**buf).clone();
-    Ok(Box::new(Cursor::new(bytes)))
+    Ok(Box::new(MemReader::new(Arc::clone(buf))))
+}
+
+/// `Read + Seek` view onto an `Arc<Vec<u8>>` buffer. One reader per
+/// `open_mem` call; each carries its own position so reads on multiple
+/// handles to the same buffer are independent.
+struct MemReader {
+    buf: Arc<Vec<u8>>,
+    pos: u64,
+}
+
+impl MemReader {
+    fn new(buf: Arc<Vec<u8>>) -> Self {
+        Self { buf, pos: 0 }
+    }
+}
+
+impl Read for MemReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let len = self.buf.len() as u64;
+        if self.pos >= len {
+            return Ok(0);
+        }
+        let avail = (len - self.pos) as usize;
+        let n = out.len().min(avail);
+        let start = self.pos as usize;
+        out[..n].copy_from_slice(&self.buf[start..start + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for MemReader {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let len = self.buf.len() as u64;
+        let new_pos = match from {
+            SeekFrom::Start(n) => n,
+            SeekFrom::End(d) => add_signed(len, d)?,
+            SeekFrom::Current(d) => add_signed(self.pos, d)?,
+        };
+        self.pos = new_pos;
+        Ok(self.pos)
+    }
+}
+
+fn add_signed(base: u64, delta: i64) -> io::Result<u64> {
+    let result = if delta >= 0 {
+        base.checked_add(delta as u64)
+    } else {
+        base.checked_sub(delta.unsigned_abs())
+    };
+    result.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mem:// reader: seek resolves to a negative or overflowing position",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -143,6 +203,61 @@ mod tests {
     fn wrong_scheme_rejected() {
         let r = open_mem("file:///tmp/x");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn seek_past_end_then_read_returns_zero() {
+        let id = fresh_id();
+        put(&id, b"abcdef".to_vec());
+        let mut r = open_mem(&format!("mem://{id}")).unwrap();
+        r.seek(SeekFrom::Start(100)).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+        // Step back inside the buffer, the bytes are still readable.
+        r.seek(SeekFrom::Start(2)).unwrap();
+        let mut chunk = [0u8; 3];
+        r.read_exact(&mut chunk).unwrap();
+        assert_eq!(&chunk, b"cde");
+        assert!(remove(&id));
+    }
+
+    #[test]
+    fn seek_before_zero_errors() {
+        let id = fresh_id();
+        put(&id, b"xy".to_vec());
+        let mut r = open_mem(&format!("mem://{id}")).unwrap();
+        let err = r.seek(SeekFrom::Current(-1));
+        assert!(err.is_err());
+        let err = r.seek(SeekFrom::End(-100));
+        assert!(err.is_err());
+        assert!(remove(&id));
+    }
+
+    #[test]
+    fn large_buffer_open_does_not_copy() {
+        // Sanity check that opening a multi-MB buffer is cheap. We
+        // don't assert peak memory here (process-level RSS is noisy),
+        // but the test exists so a future regression to a per-open
+        // clone shows up as a noticeable slowdown.
+        let id = fresh_id();
+        let big: Vec<u8> = (0..(2 * 1024 * 1024)).map(|i| (i & 0xff) as u8).collect();
+        put(&id, big.clone());
+        // Open 16 readers; with the Arc-backed design this is 16 Arc
+        // clones, not 16 × 2 MiB allocations.
+        let mut readers = Vec::with_capacity(16);
+        for _ in 0..16 {
+            readers.push(open_mem(&format!("mem://{id}")).unwrap());
+        }
+        // Each reader should see the same bytes.
+        for r in readers.iter_mut() {
+            let mut head = [0u8; 8];
+            r.read_exact(&mut head).unwrap();
+            assert_eq!(head, [0, 1, 2, 3, 4, 5, 6, 7]);
+        }
+        // And independent positions.
+        let pos = readers[0].stream_position().unwrap();
+        assert_eq!(pos, 8);
+        assert!(remove(&id));
     }
 
     #[test]

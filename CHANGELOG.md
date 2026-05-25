@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SubSource` — windowed view (`[base, base + len)` → `[0, len)`) over
+  any `Box<dyn BytesSource>`. The seekable analogue of
+  `std::io::Read::take`: containers can hand a codec a stream that looks
+  like the codec's own sample, including support for seeking back inside
+  the window (e.g. re-reading a header after probing). Bounds are
+  validated at construction via a non-destructive end-seek probe;
+  zero-length windows, exact-tail windows, and nested windows all
+  compose. Helper `stream_len(&mut dyn BytesSource) -> io::Result<u64>`
+  probes the inner length without disturbing the cursor.
 - `concat:<a>|<b>|…` scheme — concatenate several `file://` segments into
   one seekable `BytesSource`. `open_concat` opens each `|`-separated
   segment with the `file` driver (bare paths and `file://` URLs both
@@ -41,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   million-byte hit no longer iterates byte-by-byte under the lock.
 - `register()` now installs both `file` and `mem` drivers into the
   passed `RuntimeContext`.
+- `open_mem` returns an `Arc<Vec<u8>>`-backed `Read + Seek` reader
+  instead of a fresh `Cursor<Vec<u8>>` cloned from the buffer. Multiple
+  concurrent opens of the same id now share the bytes by reference; the
+  per-open cost drops from a full `Vec<u8>` copy to a single `Arc`
+  clone. Reader semantics are unchanged: each handle owns its own
+  position, so reads on different handles are still independent.
 
 ## [0.1.4](https://github.com/OxideAV/oxideav-source/compare/v0.1.3...v0.1.4) - 2026-05-06
 
