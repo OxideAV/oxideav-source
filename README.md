@@ -16,10 +16,12 @@ slot into the same opener API.
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
 | `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated `file://` segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Empty segments rejected. |
+| `slice:<offset>+<length>!<inner-uri>` | `open_slice` | URI-level windowed view: `[offset, offset + length)` of `<inner-uri>` mapped onto `[0, length)`. The inner URI may be a `file://` / bare path, `mem://`, `data:`, or another `slice:` (recursive composition). Equivalent to constructing a `SubSource` programmatically, but expressible as a single URI string for CLI flags and config files. |
 | `http://`, `https://` | provided by [oxideav-http](https://github.com/OxideAV/oxideav-http) | registered separately by that crate |
 
 `with_defaults()` pre-populates a registry with the `file`, `mem`,
-`data`, and `concat` drivers (the `file` opener in its unscoped form).
+`data`, `concat`, and `slice` drivers (the `file` opener in its unscoped
+form).
 For server-side use, build an empty registry and install a `FileScope`
 instead:
 

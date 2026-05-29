@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `slice:<offset>+<length>!<inner-uri>` scheme — URI-level windowed view
+  over an inner source. `open_slice` parses the decimal range header,
+  dispatches the inner URI to the matching bundled opener (`file://` /
+  bare path, `mem://`, `data:`, or another `slice:` for recursive
+  composition), and wraps the result in a `SubSource` that re-projects
+  `[offset, offset + length)` onto `[0, length)`. The `!` separator was
+  chosen because it never appears in `file://` paths and is not used by
+  the other bundled schemes, so the split is unambiguous even when the
+  inner URI carries its own `:` and `://`. Pipelines and CLI flags can
+  now address a sub-range of any in-process source without first
+  materialising it. `with_defaults()` and `register()` install the
+  `slice` driver alongside `file`, `mem`, `data`, and `concat`.
 - `SubSource` — windowed view (`[base, base + len)` → `[0, len)`) over
   any `Box<dyn BytesSource>`. The seekable analogue of
   `std::io::Read::take`: containers can hand a codec a stream that looks
