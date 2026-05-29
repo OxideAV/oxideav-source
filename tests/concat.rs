@@ -72,3 +72,34 @@ fn concat_malformed_errors_through_registry() {
     assert!(reg.open("concat:").is_err());
     assert!(reg.open("concat:a||b").is_err());
 }
+
+#[test]
+fn concat_mixed_inner_schemes_via_registry() {
+    // file + mem://<id> + data:,literal — same composability the `slice:`
+    // driver already offers as its inner scheme.
+    oxideav_source::mem::put("concat-it-r184", b"MEM".to_vec());
+    let f = temp_file(b"FILE");
+    let uri = format!("concat:{}|mem://concat-it-r184|data:,TAIL", f.display());
+    let reg = oxideav_source::with_defaults();
+    let mut r = open_bytes(&reg, &uri);
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf).unwrap();
+    assert_eq!(buf, b"FILEMEMTAIL");
+    oxideav_source::mem::remove("concat-it-r184");
+    std::fs::remove_file(f).ok();
+}
+
+#[test]
+fn concat_slice_segment_via_registry() {
+    // A `slice:` segment composes with a literal `data:` segment.
+    oxideav_source::mem::put("concat-it-r184-slc", b"abcdefgh".to_vec());
+    let reg = oxideav_source::with_defaults();
+    let mut r = open_bytes(
+        &reg,
+        "concat:slice:2+3!mem://concat-it-r184-slc|data:,_TAIL",
+    );
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf).unwrap();
+    assert_eq!(buf, b"cde_TAIL");
+    oxideav_source::mem::remove("concat-it-r184-slc");
+}

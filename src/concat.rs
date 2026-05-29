@@ -1,34 +1,44 @@
-//! Built-in `concat:` driver — concatenate multiple `file://` sub-sources
+//! Built-in `concat:` driver — concatenate multiple in-process sub-sources
 //! into one seekable byte stream.
 //!
 //! The scheme has **no on-wire spec**; it follows the de-facto
-//! `concat:a|b|c` shape (a `|`-separated list of paths after the
-//! `concat:` prefix). Each segment is opened as a local file via the
-//! same path rules as the [`file`](crate::open_file) driver (bare paths
-//! and `file://` URLs both accepted). The opened segments are presented
-//! as a single logical stream whose length is the sum of the segment
-//! lengths, with `Read` walking segment boundaries transparently and
-//! `Seek` resolving an absolute offset to `(segment, intra-offset)`.
+//! `concat:a|b|c` shape (a `|`-separated list of segments after the
+//! `concat:` prefix). The opened segments are presented as a single
+//! logical stream whose length is the sum of the segment lengths, with
+//! `Read` walking segment boundaries transparently and `Seek` resolving
+//! an absolute offset to `(segment, intra-offset)`.
+//!
+//! Each segment may be one of the same scheme set the [`slice:`](crate::open_slice)
+//! driver accepts as its inner URI:
+//!
+//! - `file://` and bare paths (delegates to [`open_file`]).
+//! - `mem://<id>` (delegates to [`open_mem`]).
+//! - `data:[<mediatype>][;base64],<bytes>` (delegates to [`open_data`]).
+//! - `slice:<offset>+<length>!<inner-uri>` (delegates to [`open_slice`]).
+//! - `concat:` itself is **not** allowed as a segment — a nested
+//!   `concat:` would have to embed unescaped `|` separators, which the
+//!   outer split would shred. Use a single flattened list.
 //!
 //! Grammar (informal):
 //!
 //! ```text
 //! concaturl = "concat:" segment *( "|" segment )
-//! segment   = <a file path or file:// URL, no embedded '|'>
+//! segment   = <bare path, file://, mem://, data:, or slice: URI with no embedded '|'>
 //! ```
 //!
 //! At least one non-empty segment is required. An empty segment (e.g. a
 //! trailing `|` or `a||b`) is rejected so a typo does not silently
-//! collapse to fewer inputs.
+//! collapse to fewer inputs. A literal `|` inside an inner URI is not
+//! supported; segments are split on the first level of `|` only.
 //!
 //! Each segment's byte length is captured at open time via
 //! `Seek::seek(SeekFrom::End(0))`, so the composite supports
 //! `SeekFrom::End` and reports a stable length. Segments are assumed not
 //! to change size while the composite is open; if one is truncated under
 //! us a `Read` near its tail surfaces the short read from the underlying
-//! file like any other reader.
+//! source like any other reader.
 //!
-//! Clean-room note: only the public `file://` opener and the standard
+//! Clean-room note: only the public in-process openers and the standard
 //! `Read`/`Seek` traits were used. No external `concat:` implementation
 //! was consulted.
 
@@ -36,7 +46,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use oxideav_core::{BytesSource, Error, Result};
 
+use crate::data::open_data;
 use crate::file::open_file;
+use crate::mem::open_mem;
+use crate::slice::open_slice;
 use crate::uri;
 
 /// A composite [`BytesSource`] that reads several sub-sources in order as
@@ -173,9 +186,33 @@ fn segments(rest: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
+/// Resolve a single `concat:` segment by dispatching to one of the
+/// bundled in-process openers. Mirrors the dispatch surface of the
+/// `slice:` driver: `file://` / bare paths, `mem://`, `data:`, and
+/// `slice:`. A `concat:` segment is rejected — see the module docs for
+/// the rationale (nested `concat:` would re-enter the outer `|` split).
+fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
+    let (seg_scheme, _) = uri::split(seg);
+    match seg_scheme {
+        "file" => open_file(seg),
+        "mem" => open_mem(seg),
+        "data" => open_data(seg),
+        "slice" => open_slice(seg),
+        "concat" => Err(Error::invalid(format!(
+            "concat: segment {seg:?} is itself a concat: URI; nesting concat is not supported \
+             because the outer '|' split would shred the inner segment list"
+        ))),
+        other => Err(Error::invalid(format!(
+            "concat: segment {seg:?} uses unsupported scheme {other:?}; \
+             only file/mem/data/slice are accepted"
+        ))),
+    }
+}
+
 /// Open a `concat:<a>|<b>|…` URI as a single [`BytesSource`] that reads
-/// the segments back-to-back. Each segment is opened with the `file://`
-/// driver, so bare paths and `file://` URLs are both accepted.
+/// the segments back-to-back. Each segment may be a bare path, a
+/// `file://` URL, a `mem://<id>` reference, a `data:` literal, or a
+/// `slice:` URI.
 pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
     if scheme != "concat" {
@@ -189,23 +226,7 @@ pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let segs = segments(rest)?;
     let mut parts: Vec<Box<dyn BytesSource>> = Vec::with_capacity(segs.len());
     for seg in segs {
-        // Each segment is a plain file reference. `open_file` accepts a
-        // bare path; normalise `file://` / `file:` segments by stripping
-        // the scheme through the same splitter the file driver uses.
-        let (seg_scheme, _) = uri::split(seg);
-        let opened = if seg_scheme == "file" {
-            open_file(seg)?
-        } else {
-            // Bare path (uri::split reports "file" with rest == seg) or an
-            // unsupported scheme. The file driver only knows "file"; any
-            // other scheme here is a misuse, so reject it explicitly
-            // instead of letting open_file's error message confuse.
-            return Err(Error::invalid(format!(
-                "concat: segment {seg:?} uses unsupported scheme {seg_scheme:?}; \
-                 only file paths are allowed"
-            )));
-        };
-        parts.push(opened);
+        parts.push(open_segment(seg)?);
     }
     Ok(Box::new(ConcatSource::new(parts)?))
 }
@@ -213,6 +234,8 @@ pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
+
+    use crate::mem;
 
     use super::*;
 
@@ -402,5 +425,82 @@ mod tests {
         for p in [a, empty, c] {
             std::fs::remove_file(p).ok();
         }
+    }
+
+    #[test]
+    fn data_uri_segment_accepted() {
+        // Two inline literals: "Hello, " and "world!".
+        let mut r = open_concat("concat:data:,Hello%2C%20|data:,world%21").unwrap();
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"Hello, world!");
+    }
+
+    #[test]
+    fn mem_segment_accepted() {
+        mem::put("concat-r184-a", b"AAA".to_vec());
+        mem::put("concat-r184-b", b"BB".to_vec());
+        let mut r = open_concat("concat:mem://concat-r184-a|mem://concat-r184-b").unwrap();
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"AAABB");
+        mem::remove("concat-r184-a");
+        mem::remove("concat-r184-b");
+    }
+
+    #[test]
+    fn slice_segment_accepted() {
+        // Slice a mem buffer down to [2, 5) then concat with a file.
+        mem::put("concat-r184-slc", b"abcdefgh".to_vec());
+        let f = temp_file(b"XYZ");
+        let uri = format!("concat:slice:2+3!mem://concat-r184-slc|{}", f.display());
+        let mut r = open_concat(&uri).unwrap();
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"cdeXYZ");
+        mem::remove("concat-r184-slc");
+        std::fs::remove_file(f).ok();
+    }
+
+    #[test]
+    fn mixed_schemes_concat_in_order() {
+        // file + mem + data, with a cross-boundary seek to prove the
+        // composite address space behaves regardless of underlying scheme.
+        mem::put("concat-r184-mix", b"MID".to_vec());
+        let head = temp_file(b"HEAD"); // 4 bytes, offsets 0..4
+                                       // mem        : 3 bytes, offsets 4..7
+                                       // data:,TAIL : 4 bytes, offsets 7..11
+        let uri = format!("concat:{}|mem://concat-r184-mix|data:,TAIL", head.display());
+        let mut r = open_concat(&uri).unwrap();
+        let total = r.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(total, 11);
+        r.seek(SeekFrom::Start(3)).unwrap(); // last byte of HEAD
+        let mut buf = vec![0u8; 6]; // "DMIDTA" — spans 3 segments
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"DMIDTA");
+        mem::remove("concat-r184-mix");
+        std::fs::remove_file(head).ok();
+    }
+
+    #[test]
+    fn nested_concat_segment_rejected() {
+        // A concat:-as-segment cannot be expressed unambiguously inside
+        // an outer concat: URI because the '|' split would shred the
+        // inner segment list. Reject explicitly.
+        let res = open_concat("concat:concat:a|b|c");
+        let err = res.err().expect("nested concat: must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nesting concat") || msg.contains("not supported"),
+            "expected nesting-concat rejection, got {msg}"
+        );
+    }
+
+    #[test]
+    fn unsupported_inner_scheme_rejected() {
+        // http:// segments aren't dispatchable without registry context;
+        // mirror the slice: driver's same rejection.
+        let res = open_concat("concat:http://example.com/a|http://example.com/b");
+        assert!(res.is_err());
     }
 }

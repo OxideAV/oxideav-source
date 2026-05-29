@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `concat:` driver now accepts the same inner-scheme set the `slice:`
+  driver does — segments may be bare paths, `file://`, `mem://`, `data:`,
+  or `slice:` URIs (previously only bare paths and `file://` URLs were
+  accepted). Dispatch is done per segment via the matching bundled
+  opener, so the mixed-scheme case `concat:<file>|mem://<id>|data:,TAIL`
+  works end-to-end without first materialising the inputs as files.
+  Nested `concat:` segments are rejected because the outer `|` split
+  would shred the inner segment list; use a single flattened list
+  instead. Previously-rejected `concat:mem://x|mem://y` and
+  `concat:data:,a|data:,b` URIs now succeed.
+
 ### Added
 
 - `slice:<offset>+<length>!<inner-uri>` scheme — URI-level windowed view
