@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/OxideAV/oxideav-source/compare/v0.1.4...v0.1.5) - 2026-05-29
+
+### Other
+
+- accept mem://, data:, slice: segments alongside file://
+- URI-level windowed view — slice:<offset>+<length>!<inner-uri>
+- SubSource — windowed view + Arc-backed mem:// reader
+- driver — concatenate file:// segments into one seekable stream
+- add RFC 2397 data:[...][;base64],<bytes> driver
+- make permissive() cross-platform
+- add mem:// driver + FileScope allow-list for file://
+
 ### Changed
 
 - `concat:` driver now accepts the same inner-scheme set the `slice:`
