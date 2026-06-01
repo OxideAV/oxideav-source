@@ -6,6 +6,20 @@
 //! at the new offset.
 //!
 //! Designed for streaming playback over a slow source (HTTP).
+//!
+//! ## Tuning
+//!
+//! Defaults work for typical HTTP playback: 256 KiB block reads from the
+//! inner source, a 30 s reader-side prefetch timeout, and a 1/8 lookback
+//! retention (the ring keeps ~12.5 % of its capacity behind the reader to
+//! satisfy short back-seeks without re-fetching). All four knobs —
+//! capacity, block size, lookback fraction, and prefetch timeout — are
+//! exposed via [`BufferedSource::builder`] for callers whose source has a
+//! different latency or transfer profile.
+//!
+//! Constructing a `BufferedSource` via [`BufferedSource::new`] keeps the
+//! historical signature (`capacity` only) and resolves the other knobs to
+//! their defaults.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -15,8 +29,22 @@ use std::time::Duration;
 
 use oxideav_core::ReadSeek;
 
-/// Worker reads at most this many bytes per `inner.read` call.
-const BLOCK: usize = 256 * 1024;
+/// Default worker block size in bytes (`block_size`).
+pub const DEFAULT_BLOCK: usize = 256 * 1024;
+
+/// Default reader-side prefetch wait timeout. A read that has to wait
+/// for the worker longer than this surfaces `io::ErrorKind::TimedOut`
+/// instead of hanging forever; useful when the inner source has stalled
+/// (e.g. a frozen HTTP connection).
+pub const DEFAULT_PREFETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default lookback fraction numerator. The ring keeps the most recent
+/// `capacity * LOOKBACK_NUM / LOOKBACK_DEN` bytes behind the reader so a
+/// short back-seek hits the ring instead of restarting prefetch. The
+/// default 1/8 (~12.5 %) matches the historical hardcoded value.
+pub const DEFAULT_LOOKBACK_NUM: u32 = 1;
+/// Default lookback fraction denominator. See [`DEFAULT_LOOKBACK_NUM`].
+pub const DEFAULT_LOOKBACK_DEN: u32 = 8;
 
 /// Shared state between reader and worker.
 struct RingState {
@@ -26,6 +54,16 @@ struct RingState {
     ring_start: u64,
     /// Maximum number of bytes the ring may hold.
     capacity: usize,
+    /// Worker block size: maximum bytes the worker reads from the inner
+    /// source per `read` syscall. Stored on the state so the reader-side
+    /// "free space" check can cap each worker fill at this value without
+    /// the worker having to re-export it.
+    block_size: usize,
+    /// Lookback-fraction numerator: ring retains at least
+    /// `capacity * lookback_num / lookback_den` bytes behind the reader.
+    lookback_num: u32,
+    /// Lookback-fraction denominator. See [`lookback_num`].
+    lookback_den: u32,
     /// Total length of inner source, if known.
     total_len: Option<u64>,
     /// Worker has reached EOF at the current ring tail.
@@ -45,22 +83,98 @@ struct Shared {
     not_empty: Condvar,
 }
 
-/// Buffered, prefetching wrapper around any `ReadSeek`.
-pub struct BufferedSource {
-    shared: Arc<Shared>,
-    /// Reader's logical position in the inner source.
-    pos: u64,
-    /// Worker handle. `None` only between drop signal and join.
-    worker: Option<JoinHandle<()>>,
+/// Builder for [`BufferedSource`]. Exposes every prefetch tunable for
+/// callers whose source has a non-default latency or transfer profile;
+/// callers that just want a sensible buffer can stay on
+/// [`BufferedSource::new`].
+///
+/// Defaults match `BufferedSource::new`: 1 MiB capacity, [`DEFAULT_BLOCK`]
+/// block size, [`DEFAULT_PREFETCH_TIMEOUT`] reader timeout, and
+/// `DEFAULT_LOOKBACK_NUM / DEFAULT_LOOKBACK_DEN` lookback fraction.
+///
+/// All tunables are clamped on `build` so the worker is always able to
+/// make forward progress regardless of the values handed in:
+///
+/// * `capacity` is rounded up to at least `4 * block_size` bytes so each
+///   block read fits in the ring with three more behind it.
+/// * `block_size` is rounded up to `4 KiB` if smaller (an inner `read` of
+///   a few bytes per syscall would dominate the worker's wall time).
+/// * `lookback_num / lookback_den` is clamped to the range `[0, 1)` —
+///   a denominator of zero is treated as "no lookback" and a numerator
+///   matching the denominator is dropped to "(den - 1) / den" so the
+///   reader always has at least one byte of forward window.
+/// * `prefetch_timeout` is clamped to a minimum of 1 ms so a misconfigured
+///   `Duration::ZERO` does not flap reads through `TimedOut` immediately.
+#[derive(Clone, Debug)]
+pub struct BufferedSourceBuilder {
+    capacity: usize,
+    block_size: usize,
+    prefetch_timeout: Duration,
+    lookback_num: u32,
+    lookback_den: u32,
 }
 
-impl BufferedSource {
-    /// Wrap `inner`, allocating up to `capacity` bytes for the prefetch
-    /// ring. Spawns one worker thread that takes ownership of `inner`.
-    /// `capacity` is rounded up to at least 4 × `BLOCK` so the worker
-    /// always has room to make forward progress.
-    pub fn new(mut inner: Box<dyn ReadSeek>, capacity: usize) -> io::Result<Self> {
-        let capacity = capacity.max(4 * BLOCK);
+impl Default for BufferedSourceBuilder {
+    fn default() -> Self {
+        Self {
+            capacity: 1024 * 1024,
+            block_size: DEFAULT_BLOCK,
+            prefetch_timeout: DEFAULT_PREFETCH_TIMEOUT,
+            lookback_num: DEFAULT_LOOKBACK_NUM,
+            lookback_den: DEFAULT_LOOKBACK_DEN,
+        }
+    }
+}
+
+impl BufferedSourceBuilder {
+    /// New builder with all knobs at their defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the ring capacity in bytes. Will be clamped up to at least
+    /// `4 * block_size` on `build` so the ring always holds several
+    /// worker blocks.
+    pub fn capacity(mut self, bytes: usize) -> Self {
+        self.capacity = bytes;
+        self
+    }
+
+    /// Maximum bytes the worker reads from the inner source per syscall.
+    /// Clamped up to 4 KiB on `build`. Larger values reduce per-syscall
+    /// overhead at the cost of coarser-grained ring fills.
+    pub fn block_size(mut self, bytes: usize) -> Self {
+        self.block_size = bytes;
+        self
+    }
+
+    /// Maximum time a `Read` will block waiting for the worker to push
+    /// fresh bytes. `TimedOut` is surfaced on expiry. Clamped up to 1 ms
+    /// on `build`.
+    pub fn prefetch_timeout(mut self, dt: Duration) -> Self {
+        self.prefetch_timeout = dt;
+        self
+    }
+
+    /// Fraction of the ring kept behind the reader as lookback so short
+    /// backward seeks hit the ring. Expressed as `num/den` to avoid a
+    /// floating-point knob (the worker uses integer division internally).
+    /// `0/N` disables lookback entirely. `N/N` is clamped to `(N-1)/N`
+    /// so the ring keeps a forward window.
+    pub fn lookback_fraction(mut self, num: u32, den: u32) -> Self {
+        self.lookback_num = num;
+        self.lookback_den = den;
+        self
+    }
+
+    /// Build a [`BufferedSource`] from this builder and an inner source.
+    /// Spawns one worker thread that takes ownership of `inner`.
+    pub fn build(self, mut inner: Box<dyn ReadSeek>) -> io::Result<BufferedSource> {
+        // Clamp all knobs to safe ranges. See struct docs for rationale.
+        let block_size = self.block_size.max(4 * 1024);
+        let capacity = self.capacity.max(4 * block_size);
+        let prefetch_timeout = self.prefetch_timeout.max(Duration::from_millis(1));
+        let (lookback_num, lookback_den) = sanitise_lookback(self.lookback_num, self.lookback_den);
 
         // Determine total length up front (cheap for File / HttpSource).
         let pos = inner.stream_position()?;
@@ -73,6 +187,9 @@ impl BufferedSource {
             buf: VecDeque::with_capacity(capacity),
             ring_start: pos,
             capacity,
+            block_size,
+            lookback_num,
+            lookback_den,
             total_len,
             eof: total_len == Some(pos),
             err: None,
@@ -86,13 +203,63 @@ impl BufferedSource {
         });
 
         let worker_shared = Arc::clone(&shared);
-        let worker = thread::spawn(move || worker_loop(worker_shared, inner));
+        let worker_block = block_size;
+        let worker = thread::spawn(move || worker_loop(worker_shared, inner, worker_block));
 
-        Ok(Self {
+        Ok(BufferedSource {
             shared,
             pos,
+            prefetch_timeout,
             worker: Some(worker),
         })
+    }
+}
+
+/// Clamp `(num, den)` to a valid lookback fraction in `[0, 1)`. A
+/// denominator of zero is treated as "no lookback". `num >= den` is
+/// dropped to `(den.saturating_sub(1), den)` so the ring always keeps
+/// at least one byte of forward window.
+fn sanitise_lookback(num: u32, den: u32) -> (u32, u32) {
+    if den == 0 {
+        return (0, 1);
+    }
+    if num >= den {
+        return (den.saturating_sub(1), den);
+    }
+    (num, den)
+}
+
+/// Buffered, prefetching wrapper around any `ReadSeek`.
+pub struct BufferedSource {
+    shared: Arc<Shared>,
+    /// Reader's logical position in the inner source.
+    pos: u64,
+    /// Reader-side prefetch wait timeout. Reads waiting longer than this
+    /// surface `io::ErrorKind::TimedOut`.
+    prefetch_timeout: Duration,
+    /// Worker handle. `None` only between drop signal and join.
+    worker: Option<JoinHandle<()>>,
+}
+
+impl BufferedSource {
+    /// Wrap `inner`, allocating up to `capacity` bytes for the prefetch
+    /// ring. Spawns one worker thread that takes ownership of `inner`.
+    /// `capacity` is rounded up to at least `4 * `[`DEFAULT_BLOCK`] bytes
+    /// so the worker always has room to make forward progress.
+    ///
+    /// Other knobs (block size, prefetch timeout, lookback fraction)
+    /// take their default values. Use [`BufferedSource::builder`] to
+    /// tune them.
+    pub fn new(inner: Box<dyn ReadSeek>, capacity: usize) -> io::Result<Self> {
+        BufferedSourceBuilder::new().capacity(capacity).build(inner)
+    }
+
+    /// Open a builder for fine-grained control over capacity, block size,
+    /// prefetch timeout, and lookback fraction. The builder consumes
+    /// itself on each setter, returning a fresh value, then `build(inner)`
+    /// yields the running [`BufferedSource`].
+    pub fn builder() -> BufferedSourceBuilder {
+        BufferedSourceBuilder::new()
     }
 
     /// Total length of the inner source, if known.
@@ -105,10 +272,17 @@ impl BufferedSource {
     pub fn is_empty(&self) -> bool {
         matches!(self.len(), Some(0))
     }
+
+    /// Effective prefetch timeout in use by this `BufferedSource` (after
+    /// builder clamping). Useful for diagnostics where the caller wants
+    /// to confirm the value actually installed.
+    pub fn prefetch_timeout(&self) -> Duration {
+        self.prefetch_timeout
+    }
 }
 
-fn worker_loop(shared: Arc<Shared>, mut inner: Box<dyn ReadSeek>) {
-    let mut scratch = vec![0u8; BLOCK];
+fn worker_loop(shared: Arc<Shared>, mut inner: Box<dyn ReadSeek>, block_size: usize) {
+    let mut scratch = vec![0u8; block_size];
     loop {
         // Phase 1: handle stop / seek requests, wait if ring is full.
         let to_read: usize;
@@ -148,7 +322,7 @@ fn worker_loop(shared: Arc<Shared>, mut inner: Box<dyn ReadSeek>) {
                     st = shared.not_full.wait(st).unwrap();
                     continue;
                 }
-                to_read = free.min(BLOCK);
+                to_read = free.min(st.block_size);
                 break;
             }
         }
@@ -225,9 +399,14 @@ impl Read for BufferedSource {
                 // bytes so the worker can refill.
                 let drop_n = rel + n;
                 // But keep some slack so backward seeks within recent past
-                // still hit. Use 1/8 of capacity as the "rear" the reader
-                // can lookback into without re-fetching.
-                let rear = st.capacity / 8;
+                // still hit. Use the builder-configured lookback fraction
+                // (default 1/8 of capacity) as the "rear" the reader can
+                // lookback into without re-fetching. Integer math; no
+                // floats. `lookback_den` is sanitised non-zero on build.
+                let rear = (st.capacity as u64)
+                    .saturating_mul(st.lookback_num as u64)
+                    .checked_div(st.lookback_den as u64)
+                    .unwrap_or(0) as usize;
                 if drop_n > rear {
                     let to_drop = drop_n - rear;
                     st.buf.drain(..to_drop);
@@ -242,16 +421,16 @@ impl Read for BufferedSource {
             }
             // Wait for worker to push more bytes — bounded so a stuck
             // worker becomes visible rather than deadlocking forever.
-            let (new_st, wait_result) = self
-                .shared
-                .not_empty
-                .wait_timeout(st, Duration::from_secs(30))
-                .unwrap();
+            let timeout = self.prefetch_timeout;
+            let (new_st, wait_result) = self.shared.not_empty.wait_timeout(st, timeout).unwrap();
             st = new_st;
             if wait_result.timed_out() && st.err.is_none() && !st.eof {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "BufferedSource: prefetch timeout (30s)",
+                    format!(
+                        "BufferedSource: prefetch timeout ({} ms)",
+                        timeout.as_millis()
+                    ),
                 ));
             }
         }

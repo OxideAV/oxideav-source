@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `BufferedSource::builder()` — fluent builder exposing every prefetch
+  knob (`capacity`, `block_size`, `prefetch_timeout`,
+  `lookback_fraction`) as a per-source setting. Previously the worker
+  block size (256 KiB), prefetch timeout (30 s), and lookback fraction
+  (1/8) were compile-time constants; a caller talking to a fast local
+  source or a slow satellite link had no way to tune them. The new
+  builder reads sensible defaults and clamps each knob on `build` so the
+  worker is always able to make forward progress (capacity ≥ 4 × block,
+  block ≥ 4 KiB, timeout ≥ 1 ms, lookback strictly less than 1).
+  `BufferedSource::new(inner, capacity)` keeps its historical two-arg
+  shape and now resolves all other knobs to their defaults via the
+  builder. Public constants `DEFAULT_BLOCK`,
+  `DEFAULT_PREFETCH_TIMEOUT`, `DEFAULT_LOOKBACK_NUM`, and
+  `DEFAULT_LOOKBACK_DEN` surface the defaults for callers that want to
+  re-derive them. `BufferedSource::prefetch_timeout()` returns the
+  effective timeout post-clamping for diagnostics.
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-source/compare/v0.1.4...v0.1.5) - 2026-05-29
 
 ### Other

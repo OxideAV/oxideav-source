@@ -47,7 +47,10 @@ mod slice;
 mod sub;
 mod uri;
 
-pub use buffered::BufferedSource;
+pub use buffered::{
+    BufferedSource, BufferedSourceBuilder, DEFAULT_BLOCK, DEFAULT_LOOKBACK_DEN,
+    DEFAULT_LOOKBACK_NUM, DEFAULT_PREFETCH_TIMEOUT,
+};
 pub use concat::open_concat;
 pub use data::{open_data, parse as parse_data_uri, DataUri};
 pub use file::open_file;

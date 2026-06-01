@@ -41,8 +41,32 @@ FileScope::new()
 `BufferedSource` wraps any `Box<dyn ReadSeek>` (HTTP, file, mem) with a
 worker-thread prefetch ring. Backwards seeks inside the ring window are
 handled without re-reading the inner source; seeks past the ring restart
-prefetch at the new position. Reader-side reads block on the worker for
-at most 30 s before surfacing `TimedOut`.
+prefetch at the new position.
+
+`BufferedSource::new(inner, capacity)` keeps the historical
+two-argument shape with default tunables. For finer control —
+non-default prefetch timeout, custom worker block size, or a different
+lookback fraction — use `BufferedSource::builder()`:
+
+```rust,no_run
+use std::time::Duration;
+use oxideav_source::BufferedSource;
+# fn make_inner() -> Box<dyn oxideav_core::ReadSeek> { unimplemented!() }
+let inner = make_inner();
+let buf = BufferedSource::builder()
+    .capacity(4 * 1024 * 1024)            // 4 MiB ring
+    .block_size(64 * 1024)                // 64 KiB worker syscalls
+    .prefetch_timeout(Duration::from_secs(5))
+    .lookback_fraction(1, 4)              // 25 % back-cache
+    .build(inner)
+    .unwrap();
+# let _ = buf;
+```
+
+Defaults are 1 MiB capacity, 256 KiB block size, 30 s prefetch timeout,
+1/8 lookback. Builder values are clamped on `build` so the worker is
+always able to make forward progress (capacity ≥ 4 × block, block ≥
+4 KiB, timeout ≥ 1 ms, lookback strictly less than 1).
 
 ## SubSource — windowed view
 
