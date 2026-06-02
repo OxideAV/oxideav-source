@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FileScope::deny_dir(dir)` — deny-list carve-out for the `file://`
+  driver scope. A path is rejected whenever its canonical form lies
+  under any deny-listed root, even when the allow-list (or a
+  [`FileScope::permissive`] scope) would otherwise admit it. This
+  closes the "allow `/var/media` but never `/var/media/.snapshots`"
+  gap that previously required redesigning the allow-list at
+  registration time. Deny entries override permissive scopes too:
+  `FileScope::permissive().deny_dir("/etc")` reads "everything except
+  `/etc/**`". Component-aware prefix match (so `deny_dir("/foo")`
+  does not affect `/foobar`); canonicalisation still feeds the check,
+  so a `..` path that resolves into a deny-listed subtree is blocked.
+  `FileScope::is_allowed_path(&Path)` exposes the combined verdict
+  for callers that want to test a path without opening it.
 - `BufferedSource::builder()` — fluent builder exposing every prefetch
   knob (`capacity`, `block_size`, `prefetch_timeout`,
   `lookback_fraction`) as a per-source setting. Previously the worker

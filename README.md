@@ -12,7 +12,7 @@ slot into the same opener API.
 | Scheme | Driver | Notes |
 | --- | --- | --- |
 | `file://<path>` and bare paths | `open_file` | unscoped — every readable path resolves |
-| `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list; blocks `..` traversals through symlinks |
+| `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list, with optional `deny_dir` carve-outs that override allow-list matches; blocks `..` traversals through symlinks |
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
 | `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI (same set the `slice:` driver accepts as inner). Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected. |
@@ -35,6 +35,24 @@ FileScope::new()
     .register_into(&mut reg);
 // reg.open("file:///etc/passwd") now errors instead of leaking.
 ```
+
+`deny_dir` carves a hole out of an allow-listed root — useful when a
+broad root is admitted but a subtree must stay private:
+
+```rust,no_run
+use oxideav_source::{FileScope, SourceRegistry};
+
+let mut reg = SourceRegistry::new();
+FileScope::new()
+    .allow_dir("/var/media")
+    .deny_dir("/var/media/.snapshots") // blocked even though under allow root
+    .register_into(&mut reg);
+```
+
+Deny entries override allow matches and also override
+`FileScope::permissive()`: `permissive().deny_dir("/etc")` reads
+"everything except `/etc/**`". The canonicalisation step is shared, so
+a `..` path that resolves into a deny-listed subtree is blocked.
 
 ## BufferedSource
 

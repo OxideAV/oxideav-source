@@ -1,4 +1,4 @@
-//! Security policy for the `file://` driver — directory allow-listing.
+//! Security policy for the `file://` driver — directory allow/deny lists.
 //!
 //! The default [`open_file`](crate::open_file) opener accepts any path
 //! the process can read. That is appropriate for CLI tools where the
@@ -6,13 +6,27 @@
 //! from an external request: a `file:///etc/passwd` URI would otherwise
 //! happily resolve.
 //!
-//! [`FileScope`] holds an allow-list of canonicalised directory roots.
+//! [`FileScope`] holds two canonicalised path-component lists:
+//!
+//! * **Allow-list** ([`allow_dir`](FileScope::allow_dir)) — a path is
+//!   eligible for opening only when its canonical form lies under at
+//!   least one allow-listed root. An empty allow-list rejects every
+//!   path (the [`permissive`](FileScope::permissive) constructor opts
+//!   out of this constraint).
+//! * **Deny-list** ([`deny_dir`](FileScope::deny_dir)) — even an
+//!   allow-list match (or a permissive scope) is overridden when the
+//!   canonical path lies under any deny-listed root. This carves holes
+//!   out of an allow-listed root (e.g. allow `/var/media` but never
+//!   `/var/media/.snapshots`) and also applies to
+//!   [`permissive`](FileScope::permissive) scopes —
+//!   `permissive().deny_dir(d)` is "allow anything readable except
+//!   inside `d`".
+//!
 //! A scope-bound opener resolves the requested path through
 //! `std::fs::canonicalize` (which follows symlinks and resolves `..`)
-//! and rejects anything whose canonical form is not inside one of the
-//! allow-listed roots. Install a scope with
-//! [`FileScope::register_into`]; from then on, `reg.open("file://…")`
-//! is filtered through the scope.
+//! and consults both lists against that canonical form. Install a scope
+//! with [`FileScope::register_into`]; from then on,
+//! `reg.open("file://…")` is filtered through the scope.
 //!
 //! `register_into` plumbs the active scope through a process-global
 //! slot because the registry's opener API takes a plain `fn` pointer.
@@ -30,18 +44,24 @@ use oxideav_core::{BytesSource, Error, Result, SourceRegistry};
 
 use crate::uri;
 
-/// Configurable allow-list for `file://` opens.
+/// Configurable allow/deny policy for `file://` opens.
 #[derive(Clone, Debug, Default)]
 pub struct FileScope {
-    /// Canonicalised directory roots. A request resolves to allowed iff
-    /// its canonical form starts with one of these roots (path-component
-    /// prefix match, not byte-prefix).
+    /// Canonicalised allow-list roots. A request is eligible iff its
+    /// canonical form lies under one of these roots (path-component
+    /// prefix match, not byte-prefix). Empty + non-permissive = reject
+    /// everything.
     roots: Vec<PathBuf>,
-    /// If true, every canonicalisable path is admitted (the `roots`
-    /// list is consulted only on `is_allowed`, which always returns
-    /// true while this flag is set). Used by [`permissive`](Self::permissive)
-    /// to cross-platform represent "no restriction" without baking in a
-    /// Unix-style `/` root that does not match Windows canonical paths.
+    /// Canonicalised deny-list roots. A request is rejected whenever
+    /// its canonical form lies under one of these roots, even when the
+    /// allow-list (or `permissive`) would otherwise admit it. Same
+    /// component-aware prefix match as `roots`.
+    denies: Vec<PathBuf>,
+    /// If true, the `roots` list is bypassed: any canonicalisable path
+    /// is admitted unless the deny-list rejects it. Used by
+    /// [`permissive`](Self::permissive) to represent "no restriction
+    /// from the allow side" without baking in a Unix-style `/` root
+    /// that does not match Windows canonical paths.
     permissive: bool,
 }
 
@@ -55,10 +75,13 @@ impl FileScope {
     /// A scope that permits everything the process can read. Equivalent
     /// to the default [`open_file`](crate::open_file) behaviour. Useful
     /// where the registry plumbing expects a `FileScope` but the caller
-    /// has no security policy to enforce.
+    /// has no security policy to enforce. Pairs with
+    /// [`deny_dir`](Self::deny_dir) for "everything except these
+    /// roots" policies.
     pub fn permissive() -> Self {
         Self {
             roots: Vec::new(),
+            denies: Vec::new(),
             permissive: true,
         }
     }
@@ -70,6 +93,24 @@ impl FileScope {
         let canon = std::fs::canonicalize(dir.as_ref()).unwrap_or_else(|_| dir.as_ref().into());
         if !self.roots.iter().any(|r| r == &canon) {
             self.roots.push(canon);
+        }
+        self
+    }
+
+    /// Refuse any path whose canonical form lives under `dir`, even
+    /// when the allow-list (or a [`permissive`](Self::permissive)
+    /// scope) would otherwise admit it. The directory is canonicalised
+    /// at insertion time. Use this to carve a hole out of an
+    /// allow-listed root — `allow_dir("/var/media").deny_dir("/var/media/.snapshots")`
+    /// admits the broader root but rejects the subtree.
+    ///
+    /// Deny entries take precedence: if a path is under both an allow
+    /// root and a deny root, the deny wins. Component-aware prefix
+    /// match — `deny_dir("/foo")` does not affect `/foobar`.
+    pub fn deny_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
+        let canon = std::fs::canonicalize(dir.as_ref()).unwrap_or_else(|_| dir.as_ref().into());
+        if !self.denies.iter().any(|r| r == &canon) {
+            self.denies.push(canon);
         }
         self
     }
@@ -91,7 +132,13 @@ impl FileScope {
         // is exactly what defeats a `/safe/../etc/passwd` traversal.
         let canon = std::fs::canonicalize(rest)
             .map_err(|e| Error::invalid(format!("file '{rest}' did not canonicalise: {e}")))?;
-        if !self.is_allowed(&canon) {
+        if self.is_denied(&canon) {
+            return Err(Error::invalid(format!(
+                "file '{rest}' (canonical '{}') is inside a FileScope deny-listed root",
+                canon.display()
+            )));
+        }
+        if !self.is_allow_listed(&canon) {
             return Err(Error::invalid(format!(
                 "file '{rest}' (canonical '{}') is outside the FileScope allow-list",
                 canon.display()
@@ -102,14 +149,31 @@ impl FileScope {
 
     /// True iff `canon` lies under at least one allow-listed root,
     /// matched on path components (not bytewise — `/foo` does not
-    /// permit `/foobar`). A `permissive` scope always returns true.
-    fn is_allowed(&self, canon: &Path) -> bool {
+    /// permit `/foobar`). A `permissive` scope always returns true on
+    /// this check; the deny-list is consulted separately.
+    fn is_allow_listed(&self, canon: &Path) -> bool {
         if self.permissive {
             return true;
         }
         self.roots
             .iter()
             .any(|root| under_root(root.as_path(), canon))
+    }
+
+    /// True iff `canon` lies under at least one deny-listed root.
+    fn is_denied(&self, canon: &Path) -> bool {
+        self.denies
+            .iter()
+            .any(|root| under_root(root.as_path(), canon))
+    }
+
+    /// Combined verdict: returns true iff this scope would admit
+    /// `canon` (allow-listed and not deny-listed). Useful for
+    /// callers that want to test a path without actually opening it.
+    /// The path is taken as-is; canonicalise it yourself if you want
+    /// symlink / `..` resolution.
+    pub fn is_allowed_path(&self, canon: &Path) -> bool {
+        !self.is_denied(canon) && self.is_allow_listed(canon)
     }
 
     /// Open `uri_str` under this scope.
@@ -269,5 +333,115 @@ mod tests {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut r, &mut buf).unwrap();
         assert_eq!(buf, b"payload!");
+    }
+
+    #[test]
+    fn deny_dir_carves_a_hole_inside_allow_root() {
+        let root = tmp_dir("deny-carve-root");
+        let hole = root.join("private");
+        std::fs::create_dir_all(&hole).unwrap();
+        let public_file = root.join("public.bin");
+        let private_file = hole.join("secret.bin");
+        std::fs::write(&public_file, b"public").unwrap();
+        std::fs::write(&private_file, b"secret").unwrap();
+
+        let scope = FileScope::new().allow_dir(&root).deny_dir(&hole);
+
+        // Inside the allow root and outside the deny subtree — admitted.
+        let ok = scope.resolve(&format!("file://{}", public_file.display()));
+        assert!(ok.is_ok(), "public file under allow root must be admitted");
+
+        // Inside the deny subtree — rejected even though it's under the allow root.
+        let blocked = scope.resolve(&format!("file://{}", private_file.display()));
+        assert!(
+            blocked.is_err(),
+            "file inside deny-listed subtree must be rejected"
+        );
+    }
+
+    #[test]
+    fn deny_takes_precedence_over_permissive() {
+        let hole = tmp_dir("deny-vs-permissive-hole");
+        let inside = hole.join("file.bin");
+        std::fs::write(&inside, b"x").unwrap();
+        let outside = tmp_file("deny-vs-permissive-outside", b"y");
+
+        let scope = FileScope::permissive().deny_dir(&hole);
+
+        // Outside the deny subtree — still admitted under permissive.
+        let ok = scope.resolve(&format!("file://{}", outside.display()));
+        assert!(
+            ok.is_ok(),
+            "permissive scope without deny match must still admit"
+        );
+
+        // Inside the deny subtree — rejected despite permissive.
+        let blocked = scope.resolve(&format!("file://{}", inside.display()));
+        assert!(blocked.is_err(), "deny must override permissive admission");
+    }
+
+    #[test]
+    fn deny_dir_alone_without_allow_still_rejects_everything() {
+        // Deny without allow == still empty allow-list == reject all.
+        let hole = tmp_dir("deny-without-allow");
+        let inside = hole.join("file.bin");
+        std::fs::write(&inside, b"x").unwrap();
+        let scope = FileScope::new().deny_dir(&hole);
+        let r = scope.resolve(&format!("file://{}", inside.display()));
+        assert!(
+            r.is_err(),
+            "deny-only scope has empty allow-list and must reject"
+        );
+    }
+
+    #[test]
+    fn deny_dir_component_aware() {
+        // /tmp/.../hole vs /tmp/.../hole_extra — bytewise-prefix match
+        // but not a component-prefix; deny on `hole` must NOT cover
+        // `hole_extra`.
+        let allow_root = tmp_dir("deny-comp-aware-allow");
+        let hole = allow_root.join("hole");
+        let neighbour = allow_root.join("hole_extra");
+        std::fs::create_dir_all(&hole).unwrap();
+        std::fs::create_dir_all(&neighbour).unwrap();
+        let neighbour_file = neighbour.join("file.bin");
+        std::fs::write(&neighbour_file, b"x").unwrap();
+
+        let scope = FileScope::new().allow_dir(&allow_root).deny_dir(&hole);
+        let r = scope.resolve(&format!("file://{}", neighbour_file.display()));
+        assert!(
+            r.is_ok(),
+            "deny on 'hole' must not cover the sibling 'hole_extra'"
+        );
+    }
+
+    #[test]
+    fn duplicate_deny_dir_is_idempotent() {
+        let allow_root = tmp_dir("deny-dedup-allow");
+        let hole = allow_root.join("hole");
+        std::fs::create_dir_all(&hole).unwrap();
+        let scope = FileScope::new()
+            .allow_dir(&allow_root)
+            .deny_dir(&hole)
+            .deny_dir(&hole);
+        assert_eq!(scope.denies.len(), 1);
+    }
+
+    #[test]
+    fn is_allowed_path_inspector_matches_resolve() {
+        let allow_root = tmp_dir("inspector-allow");
+        let hole = allow_root.join("hole");
+        std::fs::create_dir_all(&hole).unwrap();
+        let public_file = allow_root.join("public.bin");
+        let private_file = hole.join("secret.bin");
+        std::fs::write(&public_file, b"p").unwrap();
+        std::fs::write(&private_file, b"s").unwrap();
+
+        let scope = FileScope::new().allow_dir(&allow_root).deny_dir(&hole);
+
+        let public_canon = std::fs::canonicalize(&public_file).unwrap();
+        let private_canon = std::fs::canonicalize(&private_file).unwrap();
+        assert!(scope.is_allowed_path(&public_canon));
+        assert!(!scope.is_allowed_path(&private_canon));
     }
 }

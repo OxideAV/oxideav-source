@@ -83,3 +83,67 @@ fn scoped_registry_rejects_traversal() {
         "traversal through allowed-root must be rejected"
     );
 }
+
+#[test]
+fn scoped_registry_deny_dir_carves_hole_inside_allow_root() {
+    let _guard = SCOPE_LOCK.lock().unwrap();
+    let root = tmpdir("deny-carve-root");
+    let hole = root.join("private");
+    let _ = std::fs::create_dir_all(&hole);
+    let public_file = root.join("public.bin");
+    let private_file = hole.join("secret.bin");
+    std::fs::write(&public_file, b"public-payload").unwrap();
+    std::fs::write(&private_file, b"secret-payload").unwrap();
+
+    let mut reg = SourceRegistry::new();
+    FileScope::new()
+        .allow_dir(&root)
+        .deny_dir(&hole)
+        .register_into(&mut reg);
+
+    // Public file under allow root — admitted, contents reach us.
+    let mut r = open_bytes(&reg, &format!("file://{}", public_file.display()));
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf).unwrap();
+    assert_eq!(buf, b"public-payload");
+
+    // File under the deny subtree — rejected even though it is also
+    // under the allow root.
+    let err = reg.open(&format!("file://{}", private_file.display()));
+    assert!(
+        err.is_err(),
+        "registry must reject file inside deny-listed subtree"
+    );
+}
+
+#[test]
+fn scoped_registry_deny_traversal_into_hole_is_blocked() {
+    // Address a denied file via a traversal path. Canonicalisation
+    // resolves the `..`, so the deny-list still catches it.
+    let _guard = SCOPE_LOCK.lock().unwrap();
+    let root = tmpdir("deny-traversal-root");
+    let hole = root.join("private");
+    let _ = std::fs::create_dir_all(&hole);
+    let private_file = hole.join("secret.bin");
+    std::fs::write(&private_file, b"secret").unwrap();
+
+    // /tmp/.../root/public-decoy/../private/secret.bin — the path
+    // segment "public-decoy" doesn't need to exist for canonicalize
+    // resolution of `..`; what matters is the post-canonicalise form.
+    // Build a real intermediate so canonicalize works.
+    let decoy = root.join("public-decoy");
+    let _ = std::fs::create_dir_all(&decoy);
+    let traversal = decoy.join("..").join("private").join("secret.bin");
+
+    let mut reg = SourceRegistry::new();
+    FileScope::new()
+        .allow_dir(&root)
+        .deny_dir(&hole)
+        .register_into(&mut reg);
+
+    let r = reg.open(&format!("file://{}", traversal.display()));
+    assert!(
+        r.is_err(),
+        "traversal into deny-listed subtree must be rejected"
+    );
+}
