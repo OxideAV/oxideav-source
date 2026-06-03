@@ -11,8 +11,8 @@ slot into the same opener API.
 
 | Scheme | Driver | Notes |
 | --- | --- | --- |
-| `file://<path>` and bare paths | `open_file` | unscoped — every readable path resolves |
-| `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list, with optional `deny_dir` carve-outs that override allow-list matches; blocks `..` traversals through symlinks |
+| `file://<path>` and bare paths | `open_file` | unscoped — every readable path resolves. `file:` / `file://` inputs are **percent-decoded** per RFC 3986 §2.1 (so `file:///tmp/foo%20bar.txt` opens `/tmp/foo bar.txt`); bare paths are passed verbatim so a real file with `%` in its name still opens |
+| `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list, with optional `deny_dir` carve-outs that override allow-list matches; blocks `..` traversals through symlinks; same RFC 3986 §2.1 percent-decoding for URI-form inputs |
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
 | `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI (same set the `slice:` driver accepts as inner). Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected. |

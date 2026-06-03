@@ -124,23 +124,32 @@ impl FileScope {
                 "FileScope cannot resolve non-file URI: {uri_str}"
             )));
         }
+        // Percent-decode the path component when the caller used an
+        // explicit `file:` / `file://` prefix (matches `open_file`). Bare
+        // paths are passed verbatim so a real `%` in the filename works.
+        // Done before the NUL check so a smuggled `%00` is also caught.
+        let decoded: String = if uri::has_file_scheme(uri_str) {
+            uri::percent_decode_path(rest)?
+        } else {
+            rest.to_string()
+        };
         // Reject paths containing a NUL byte before we even touch the FS.
-        if rest.as_bytes().contains(&0u8) {
+        if decoded.as_bytes().contains(&0u8) {
             return Err(Error::invalid("file path contains NUL byte"));
         }
         // Canonicalise — this follows symlinks and resolves `..`, which
         // is exactly what defeats a `/safe/../etc/passwd` traversal.
-        let canon = std::fs::canonicalize(rest)
-            .map_err(|e| Error::invalid(format!("file '{rest}' did not canonicalise: {e}")))?;
+        let canon = std::fs::canonicalize(&decoded)
+            .map_err(|e| Error::invalid(format!("file '{decoded}' did not canonicalise: {e}")))?;
         if self.is_denied(&canon) {
             return Err(Error::invalid(format!(
-                "file '{rest}' (canonical '{}') is inside a FileScope deny-listed root",
+                "file '{decoded}' (canonical '{}') is inside a FileScope deny-listed root",
                 canon.display()
             )));
         }
         if !self.is_allow_listed(&canon) {
             return Err(Error::invalid(format!(
-                "file '{rest}' (canonical '{}') is outside the FileScope allow-list",
+                "file '{decoded}' (canonical '{}') is outside the FileScope allow-list",
                 canon.display()
             )));
         }
@@ -425,6 +434,43 @@ mod tests {
             .deny_dir(&hole)
             .deny_dir(&hole);
         assert_eq!(scope.denies.len(), 1);
+    }
+
+    #[test]
+    fn scope_resolve_percent_decodes_file_url() {
+        // A scope must percent-decode `%HH` in the URI form before
+        // canonicalising / checking against the allow-list.
+        let dir = tmp_dir("scope-percent-decodes");
+        let file = dir.join("name with space.bin");
+        std::fs::write(&file, b"ok").unwrap();
+        let scope = FileScope::new().allow_dir(&dir);
+
+        // Encode the space as %20 per RFC 3986 §2.1.
+        let encoded = file.display().to_string().replace(' ', "%20");
+        let canon = scope.resolve(&format!("file://{encoded}")).unwrap();
+        assert_eq!(canon, std::fs::canonicalize(&file).unwrap());
+    }
+
+    #[test]
+    fn scope_resolve_percent_decoded_nul_rejected() {
+        // Smuggling a NUL byte via `%00` must be caught after decoding,
+        // before the path reaches the filesystem.
+        let scope = FileScope::permissive();
+        let r = scope.resolve("file:///tmp/x%00y");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn scope_resolve_bare_path_does_not_percent_decode() {
+        // A bare path is taken verbatim. The test file's name actually
+        // contains `%20`; the scope must not decode it.
+        let dir = tmp_dir("scope-bare-no-decode");
+        let file = dir.join("100%20raw.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let scope = FileScope::new().allow_dir(&dir);
+        // Bare path form (no scheme) — verbatim resolution.
+        let canon = scope.resolve(&file.display().to_string()).unwrap();
+        assert_eq!(canon, std::fs::canonicalize(&file).unwrap());
     }
 
     #[test]

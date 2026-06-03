@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `file://` driver percent-decodes the URI path per RFC 3986 §2.1. A URI
+  of the form `file:///tmp/foo%20bar.txt` now opens `/tmp/foo bar.txt`
+  as every spec-conformant URI handler does, and a UTF-8-encoded
+  multibyte name (`file:///tmp/Привет.bin` written as
+  `file:///tmp/%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82.bin`) round-trips
+  through `reg.open` end-to-end. Bare paths (no scheme) remain
+  verbatim, so a real file whose name actually contains `%` continues
+  to open. The same decode step is applied inside `FileScope::resolve`
+  before the canonicalise / allow-list check, so a smuggled `%00`
+  surfaces as a NUL-byte rejection before the path reaches the
+  filesystem. New helpers in `oxideav_source::uri`:
+  `percent_decode_path` (returns `String`, UTF-8-validated),
+  `percent_decode_bytes` (returns `Vec<u8>` for paths that may not be
+  UTF-8), and `has_file_scheme` (case-insensitive `file:` prefix test
+  used to gate decoding to URI-form inputs).
 - `FileScope::deny_dir(dir)` — deny-list carve-out for the `file://`
   driver scope. A path is rejected whenever its canonical form lies
   under any deny-listed root, even when the allow-list (or a
