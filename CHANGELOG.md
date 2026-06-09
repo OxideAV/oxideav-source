@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SliceUri` — public typed view of a parsed `slice:` URI, parallel to
+  the existing `DataUri` for `data:`. `parse_slice_uri(uri_str)` (also
+  available as `slice::parse`) returns a `SliceUri { offset, length,
+  inner: String }` without opening any inner source, letting CLI
+  parsers, pipeline tooling, and fixture builders inspect or transform
+  the parsed form before deciding whether (or how) to dispatch. The
+  constructor `SliceUri::new(offset, length, inner)` validates `inner`
+  (rejects empty + `!`-containing strings up-front so a non-round-trippable
+  URI cannot be silently produced), and `SliceUri::format` / the
+  `Display` impl emit the canonical `slice:<offset>+<length>!<inner>`
+  form so `parse → format` is byte-identical for every URI the parser
+  accepts. The existing string-only `open_slice(uri_str)` entry point
+  is unchanged.
 - `file://` driver percent-decodes the URI path per RFC 3986 §2.1. A URI
   of the form `file:///tmp/foo%20bar.txt` now opens `/tmp/foo bar.txt`
   as every spec-conformant URI handler does, and a UTF-8-encoded

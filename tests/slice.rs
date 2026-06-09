@@ -2,7 +2,7 @@
 
 use std::io::Read;
 
-use oxideav_source::{mem, BytesSource, SourceOutput, SourceRegistry};
+use oxideav_source::{mem, parse_slice_uri, BytesSource, SliceUri, SourceOutput, SourceRegistry};
 
 fn open_bytes(reg: &SourceRegistry, uri: &str) -> Box<dyn BytesSource> {
     match reg.open(uri).expect("open") {
@@ -47,4 +47,31 @@ fn slice_window_overflow_errors_through_registry() {
     let r = reg.open("slice:8+16!mem://test-slice-overflow");
     assert!(r.is_err(), "windowing past inner length must error");
     assert!(mem::remove("test-slice-overflow"));
+}
+
+#[test]
+fn parse_slice_uri_typed_public_api() {
+    // Public typed parser is reachable from a downstream crate via the
+    // re-exported `parse_slice_uri` name (parallel to `parse_data_uri`).
+    let s = parse_slice_uri("slice:100+250!mem://x").unwrap();
+    assert_eq!(s.offset, 100);
+    assert_eq!(s.length, 250);
+    assert_eq!(s.inner, "mem://x");
+}
+
+#[test]
+fn slice_uri_builder_round_trip_via_registry() {
+    // Build a slice URI programmatically (no `format!()` gymnastics on
+    // the caller side), open it through the registry, read it back.
+    let body: Vec<u8> = (0..=255u8).collect();
+    mem::put("test-slice-builder", body.clone());
+    let uri = SliceUri::new(32, 8, "mem://test-slice-builder")
+        .unwrap()
+        .format();
+    let reg = oxideav_source::with_defaults();
+    let mut r = open_bytes(&reg, &uri);
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf).unwrap();
+    assert_eq!(buf, &body[32..40]);
+    assert!(mem::remove("test-slice-builder"));
 }

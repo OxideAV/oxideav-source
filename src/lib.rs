@@ -56,7 +56,7 @@ pub use data::{open_data, parse as parse_data_uri, DataUri};
 pub use file::open_file;
 pub use mem::open_mem;
 pub use scope::{open_file_scoped, FileScope};
-pub use slice::open_slice;
+pub use slice::{open_slice, parse as parse_slice_uri, SliceUri};
 pub use sub::{stream_len, SubSource};
 
 /// Build a [`SourceRegistry`] pre-populated with the built-in `file`,

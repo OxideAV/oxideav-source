@@ -86,6 +86,29 @@ Defaults are 1 MiB capacity, 256 KiB block size, 30 s prefetch timeout,
 always able to make forward progress (capacity ≥ 4 × block, block ≥
 4 KiB, timeout ≥ 1 ms, lookback strictly less than 1).
 
+## Programmatic slice-URI construction
+
+`slice:` URIs can be built and inspected without string-formatting via
+the public `SliceUri` type (parallel to `DataUri` for `data:`):
+
+```rust,no_run
+use oxideav_source::{parse_slice_uri, SliceUri};
+
+// Build from components — validates inner up-front.
+let s = SliceUri::new(4_321_000, 34_112, "file:///some/container.mp4").unwrap();
+assert_eq!(s.format(), "slice:4321000+34112!file:///some/container.mp4");
+
+// Parse without opening: useful for CLI flag inspection.
+let parsed = parse_slice_uri("slice:0+1024!mem://probe").unwrap();
+assert_eq!(parsed.offset, 0);
+assert_eq!(parsed.length, 1024);
+assert_eq!(parsed.inner, "mem://probe");
+```
+
+`parse → format` is byte-identical for every URI the parser accepts;
+`SliceUri::new` rejects an empty inner and an inner containing a literal
+`!` (which would re-enter the grammar at the wrong split).
+
 ## SubSource — windowed view
 
 `SubSource` re-projects a slice `[base, base + len)` of an inner

@@ -57,7 +57,102 @@ use crate::mem::open_mem;
 use crate::sub::SubSource;
 use crate::uri;
 
-/// Parsed `slice:` URI header.
+/// Parsed components of a `slice:` URI.
+///
+/// Mirrors [`crate::DataUri`] for the `data:` scheme: a public typed view
+/// over the parsed form, so callers that want to inspect a slice URI
+/// without immediately opening it (CLI parsers, pipeline tooling,
+/// fixture builders) can do so without re-implementing the grammar.
+///
+/// Round-trip: [`parse`] followed by [`SliceUri::format`] reproduces a
+/// byte-identical URI string for every input the parser accepts (the
+/// grammar has a single canonical form — no whitespace, no leading
+/// zeros are introduced, and the `!` separator is unambiguous because
+/// inner URIs containing literal `!` are rejected at construction
+/// time).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SliceUri {
+    /// Absolute byte offset within the inner source at which the window
+    /// starts.
+    pub offset: u64,
+    /// Window length in bytes. A zero-length window is admitted (it
+    /// produces an immediate-EOF reader, matching [`SubSource`]'s
+    /// zero-length semantics).
+    pub length: u64,
+    /// Inner URI string. Any of the schemes [`open_slice`] accepts as
+    /// an inner source (`file://` / bare path, `mem://`, `data:`, or a
+    /// nested `slice:`); not validated by the parser beyond
+    /// non-empty and `!`-free for round-trip safety.
+    pub inner: String,
+}
+
+impl SliceUri {
+    /// Build a `SliceUri` from its three components. Rejects an empty
+    /// `inner` (the `!` separator would dangle) and an `inner`
+    /// containing a literal `!` (the grammar splits on the first `!`
+    /// after the length token, so an embedded `!` would re-enter the
+    /// parser at the wrong position and round-trip would silently
+    /// produce a different URI).
+    pub fn new(offset: u64, length: u64, inner: impl Into<String>) -> Result<Self> {
+        let inner: String = inner.into();
+        if inner.is_empty() {
+            return Err(Error::invalid("slice: URI inner reference cannot be empty"));
+        }
+        if inner.contains('!') {
+            return Err(Error::invalid(format!(
+                "slice: URI inner reference {inner:?} contains a '!'; \
+                 a literal '!' inside the inner URI cannot round-trip \
+                 because the grammar splits on the first '!' after the \
+                 length token"
+            )));
+        }
+        Ok(Self {
+            offset,
+            length,
+            inner,
+        })
+    }
+
+    /// Format this `SliceUri` back into its canonical
+    /// `slice:<offset>+<length>!<inner>` string form. The grammar has a
+    /// single canonical form so a [`parse`] followed by [`format`]
+    /// reproduces a byte-identical URI for every input the parser
+    /// accepts.
+    pub fn format(&self) -> String {
+        format!("slice:{}+{}!{}", self.offset, self.length, self.inner)
+    }
+}
+
+impl std::fmt::Display for SliceUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "slice:{}+{}!{}", self.offset, self.length, self.inner)
+    }
+}
+
+/// Parse a `slice:` URI into its [`SliceUri`] components without opening
+/// any inner source. Useful for callers that want to inspect or
+/// transform the parsed form before deciding whether (or how) to open
+/// it — the reverse of [`SliceUri::format`].
+///
+/// Rejects URIs with a wrong scheme, a missing `!` separator, a missing
+/// `+` between offset and length, a non-decimal offset or length, or an
+/// empty inner reference.
+pub fn parse(uri_str: &str) -> Result<SliceUri> {
+    let (scheme, rest) = uri::split(uri_str);
+    if scheme != "slice" {
+        return Err(Error::invalid(format!(
+            "slice driver invoked on non-slice URI: {uri_str}"
+        )));
+    }
+    let h = parse_header(rest)?;
+    Ok(SliceUri {
+        offset: h.offset,
+        length: h.length,
+        inner: h.inner.to_string(),
+    })
+}
+
+/// Parsed `slice:` URI header (internal, borrows from the input).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SliceHeader<'a> {
     offset: u64,
@@ -320,5 +415,129 @@ mod tests {
     fn missing_inner_file_errors() {
         let uri = "slice:0+10!/no/such/path/xyzzy-oxideav-slice-r178";
         assert!(open_slice(uri).is_err());
+    }
+
+    // ---- typed `SliceUri` parse / format / round-trip ----
+
+    #[test]
+    fn typed_parse_basic() {
+        let s = parse("slice:10+20!file:///tmp/x").unwrap();
+        assert_eq!(s.offset, 10);
+        assert_eq!(s.length, 20);
+        assert_eq!(s.inner, "file:///tmp/x");
+    }
+
+    #[test]
+    fn typed_parse_zero_length_admitted() {
+        let s = parse("slice:0+0!mem://x").unwrap();
+        assert_eq!(s.offset, 0);
+        assert_eq!(s.length, 0);
+        assert_eq!(s.inner, "mem://x");
+    }
+
+    #[test]
+    fn typed_parse_nested_inner_preserved() {
+        // Nested slice: as inner — the outer parser does not recurse,
+        // so the entire `slice:5+3!mem://x` becomes the parsed inner.
+        let s = parse("slice:10+20!slice:5+3!mem://x").unwrap();
+        assert_eq!(s.offset, 10);
+        assert_eq!(s.length, 20);
+        assert_eq!(s.inner, "slice:5+3!mem://x");
+    }
+
+    #[test]
+    fn typed_parse_data_inner_with_colon_preserved() {
+        // The inner is `data:image/gif;base64,SGVsbG8=` — it contains
+        // a colon and a `;` but no `!`, so it round-trips unchanged.
+        let s = parse("slice:1+3!data:image/gif;base64,SGVsbG8=").unwrap();
+        assert_eq!(s.inner, "data:image/gif;base64,SGVsbG8=");
+    }
+
+    #[test]
+    fn typed_parse_wrong_scheme_rejected() {
+        assert!(parse("file:///tmp/x").is_err());
+        assert!(parse("mem://x").is_err());
+        assert!(parse("data:,x").is_err());
+    }
+
+    #[test]
+    fn typed_parse_missing_bang_rejected() {
+        assert!(parse("slice:10+20").is_err());
+    }
+
+    #[test]
+    fn typed_parse_missing_plus_rejected() {
+        assert!(parse("slice:10!file:///x").is_err());
+    }
+
+    #[test]
+    fn typed_parse_empty_inner_rejected() {
+        assert!(parse("slice:10+20!").is_err());
+    }
+
+    #[test]
+    fn typed_parse_negative_offset_rejected() {
+        // u64 does not accept `-`; bubble the parse error.
+        assert!(parse("slice:-1+20!mem://x").is_err());
+    }
+
+    #[test]
+    fn typed_format_matches_canonical_form() {
+        let s = SliceUri::new(10, 20, "file:///tmp/x").unwrap();
+        assert_eq!(s.format(), "slice:10+20!file:///tmp/x");
+        // Display impl matches `format`.
+        assert_eq!(s.to_string(), "slice:10+20!file:///tmp/x");
+    }
+
+    #[test]
+    fn typed_round_trip_byte_identical() {
+        // Every URI the parser accepts round-trips byte-identically
+        // through `parse -> format` because the grammar has a single
+        // canonical form.
+        for uri in [
+            "slice:0+0!mem://x",
+            "slice:1+1!data:,A",
+            "slice:42+128!file:///tmp/foo.bin",
+            "slice:18446744073709551615+1!mem://max-offset", // u64::MAX
+            "slice:1+18446744073709551615!mem://max-length", // u64::MAX length
+            "slice:5+10!data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            let parsed = parse(uri).expect(uri);
+            assert_eq!(parsed.format(), uri, "round-trip mismatch on {uri}");
+        }
+    }
+
+    #[test]
+    fn typed_constructor_rejects_empty_inner() {
+        assert!(SliceUri::new(0, 0, "").is_err());
+    }
+
+    #[test]
+    fn typed_constructor_rejects_bang_in_inner() {
+        // A literal `!` in the inner would re-enter the parser at the
+        // wrong split, so the constructor rejects it up-front rather
+        // than silently producing a non-round-trippable URI.
+        let r = SliceUri::new(0, 1, "file:///tmp/a!b");
+        assert!(r.is_err(), "inner with embedded '!' must be rejected");
+        let msg = r.err().unwrap().to_string();
+        assert!(
+            msg.contains("'!'") || msg.contains("round-trip"),
+            "expected '!'-in-inner rejection message, got {msg}"
+        );
+    }
+
+    #[test]
+    fn typed_constructor_accepts_then_opens() {
+        // Build a SliceUri via the typed constructor, format it, hand
+        // the string to the existing opener — end-to-end pipeline.
+        mem::put("slice-r264-typed-open", ramp(64));
+        let uri = SliceUri::new(8, 16, "mem://slice-r264-typed-open")
+            .unwrap()
+            .format();
+        let mut r = open_slice(&uri).unwrap();
+        let mut out = vec![0u8; 16];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(out, ramp(64)[8..24]);
+        mem::remove("slice-r264-typed-open");
     }
 }
