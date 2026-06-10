@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SliceUri::open(&self)` — open the window described by a typed
+  `SliceUri` directly, without round-tripping through the URI string.
+  Resolves `inner` with the matching bundled opener (`file://` / bare
+  path, `mem://`, `data:`, or a nested `slice:`) and wraps it in a
+  `SubSource` over `[offset, offset + length)`. This is the typed
+  analogue of `open_slice` and the slice-scheme parallel to
+  `DataUri` → `open_data`: a caller that built a `SliceUri` via
+  `SliceUri::new` or inspected one via `parse_slice_uri` can open it
+  straight away instead of calling `.format()` and re-parsing the
+  string. `open_slice(uri_str)` is now defined as
+  `parse(uri_str)?.open()`, so the URI-string and typed-value entry
+  points share a single open code path and cannot drift apart; the
+  reader `parsed.open()` returns is byte-identical to
+  `open_slice(&parsed.format())`.
 - `SliceUri` — public typed view of a parsed `slice:` URI, parallel to
   the existing `DataUri` for `data:`. `parse_slice_uri(uri_str)` (also
   available as `slice::parse`) returns a `SliceUri { offset, length,

@@ -121,6 +121,24 @@ impl SliceUri {
     pub fn format(&self) -> String {
         format!("slice:{}+{}!{}", self.offset, self.length, self.inner)
     }
+
+    /// Open the window described by this typed value directly, without
+    /// round-tripping through the URI string. Resolves `inner` with the
+    /// matching bundled opener (`file://` / bare path, `mem://`, `data:`,
+    /// or a nested `slice:`) and wraps the result in a [`SubSource`] that
+    /// re-projects `[offset, offset + length)` onto `[0, length)`.
+    ///
+    /// This is the typed analogue of [`open_slice`] and the slice-scheme
+    /// parallel to [`crate::DataUri`] → [`crate::open_data`]: a caller
+    /// that built a `SliceUri` via [`SliceUri::new`] or inspected one via
+    /// [`parse`] can open it straight away instead of calling
+    /// [`SliceUri::format`] and re-parsing the string. The resulting
+    /// reader is byte-for-byte identical to `open_slice(&self.format())`.
+    pub fn open(&self) -> Result<Box<dyn BytesSource>> {
+        let inner = open_inner(&self.inner)?;
+        let sub = SubSource::new(inner, self.offset, self.length)?;
+        Ok(Box::new(sub))
+    }
 }
 
 impl std::fmt::Display for SliceUri {
@@ -217,17 +235,13 @@ fn open_inner(inner: &str) -> Result<Box<dyn BytesSource>> {
 }
 
 /// Open a `slice:<offset>+<length>!<inner-uri>` URI.
+///
+/// Equivalent to [`parse`] followed by [`SliceUri::open`]: the string is
+/// parsed into a [`SliceUri`] and then opened through the single typed
+/// open path, so the URI-string and typed-value entry points cannot
+/// drift apart.
 pub fn open_slice(uri_str: &str) -> Result<Box<dyn BytesSource>> {
-    let (scheme, rest) = uri::split(uri_str);
-    if scheme != "slice" {
-        return Err(Error::invalid(format!(
-            "slice driver invoked on non-slice URI: {uri_str}"
-        )));
-    }
-    let header = parse_header(rest)?;
-    let inner = open_inner(header.inner)?;
-    let sub = SubSource::new(inner, header.offset, header.length)?;
-    Ok(Box::new(sub))
+    parse(uri_str)?.open()
 }
 
 #[cfg(test)]
@@ -539,5 +553,86 @@ mod tests {
         r.read_exact(&mut out).unwrap();
         assert_eq!(out, ramp(64)[8..24]);
         mem::remove("slice-r264-typed-open");
+    }
+
+    // ---- typed `SliceUri::open` (open straight from the typed value) ----
+
+    #[test]
+    fn typed_open_direct_from_constructor() {
+        // Build via the constructor and open directly — no format/parse
+        // round-trip through the string form.
+        mem::put("slice-r271-direct", ramp(64));
+        let mut r = SliceUri::new(8, 16, "mem://slice-r271-direct")
+            .unwrap()
+            .open()
+            .unwrap();
+        let mut out = vec![0u8; 16];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(out, ramp(64)[8..24]);
+        mem::remove("slice-r271-direct");
+    }
+
+    #[test]
+    fn typed_open_matches_open_slice_bytes() {
+        // `parsed.open()` must produce a byte-identical reader to
+        // `open_slice(&parsed.format())`.
+        mem::put("slice-r271-equiv", ramp(200));
+        let s = parse("slice:30+40!mem://slice-r271-equiv").unwrap();
+
+        let mut via_typed = s.open().unwrap();
+        let mut a = vec![0u8; 40];
+        via_typed.read_exact(&mut a).unwrap();
+
+        let mut via_string = open_slice(&s.format()).unwrap();
+        let mut b = vec![0u8; 40];
+        via_string.read_exact(&mut b).unwrap();
+
+        assert_eq!(a, b);
+        assert_eq!(a, ramp(200)[30..70]);
+        mem::remove("slice-r271-equiv");
+    }
+
+    #[test]
+    fn typed_open_data_inner() {
+        // data: inner — open straight from the typed value.
+        let mut r = parse("slice:3+2!data:,ABCDEFGHIJ").unwrap().open().unwrap();
+        let mut out = vec![0u8; 2];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(&out, b"DE");
+    }
+
+    #[test]
+    fn typed_open_nested_slice_inner() {
+        // The inner is itself a slice: — `open()` resolves it recursively
+        // through `open_inner`, matching `open_slice`'s recursion. A
+        // nested inner carries its own `!`, so it cannot come from the
+        // strict `SliceUri::new` constructor (which rejects `!` for
+        // round-trip safety) — it is produced by `parse`, which splits
+        // on the first `!` only and leaves the rest as the inner.
+        mem::put("slice-r271-nest", ramp(64));
+        let s = parse("slice:5+10!slice:10+20!mem://slice-r271-nest").unwrap();
+        assert_eq!(s.inner, "slice:10+20!mem://slice-r271-nest");
+        let mut r = s.open().unwrap();
+        let mut out = vec![0u8; 10];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(out, ramp(64)[15..25]);
+        mem::remove("slice-r271-nest");
+    }
+
+    #[test]
+    fn typed_open_window_past_inner_rejected() {
+        // Bounds are validated at open time, same as `open_slice`.
+        mem::put("slice-r271-past", ramp(64));
+        let s = SliceUri::new(50, 50, "mem://slice-r271-past").unwrap();
+        assert!(s.open().is_err());
+        mem::remove("slice-r271-past");
+    }
+
+    #[test]
+    fn typed_open_unsupported_inner_scheme_rejected() {
+        // http:// has no captured-state opener, so the typed open path
+        // rejects it just like `open_slice`.
+        let s = SliceUri::new(0, 10, "http://example.com/x").unwrap();
+        assert!(s.open().is_err());
     }
 }

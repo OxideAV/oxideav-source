@@ -105,6 +105,20 @@ assert_eq!(parsed.length, 1024);
 assert_eq!(parsed.inner, "mem://probe");
 ```
 
+A typed `SliceUri` opens directly via `SliceUri::open`, the slice-scheme
+analogue of `DataUri` → `open_data` — no need to format back to a string
+and re-parse:
+
+```rust,no_run
+use oxideav_source::SliceUri;
+
+let s = SliceUri::new(8, 16, "mem://probe").unwrap();
+let _reader = s.open().unwrap(); // == open_slice(&s.format())
+```
+
+`open_slice(uri_str)` is itself `parse_slice_uri(uri_str)?.open()`, so the
+string and typed entry points share one open path and stay in lock-step.
+
 `parse → format` is byte-identical for every URI the parser accepts;
 `SliceUri::new` rejects an empty inner and an inner containing a literal
 `!` (which would re-enter the grammar at the wrong split).
