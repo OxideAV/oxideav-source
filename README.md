@@ -1,5 +1,7 @@
 # oxideav-source
 
+[![CI](https://github.com/OxideAV/oxideav-source/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-source/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-source.svg)](https://crates.io/crates/oxideav-source) [![docs.rs](https://docs.rs/oxideav-source/badge.svg)](https://docs.rs/oxideav-source) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Generic source registry: opens URIs into `Read + Seek` byte streams,
 with bundled drivers and a prefetching `BufferedSource` wrapper.
 
