@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `BufferedSource` worker errors are now **sticky** and ordered after
+  ring data. Previously the error was `take`n and surfaced exactly
+  once; every subsequent read missed the ring, slept on the prefetch
+  condvar, and after `prefetch_timeout` (default 30 s) reported a
+  misleading `TimedOut` — and because the worker thread had exited, a
+  seek-restart could never recover. Now the failure is stored as
+  `(kind, message)` and re-surfaced on every read; prefetched bytes
+  remain readable first (including lookback-window back-seeks) with
+  the error surfacing only once the ring is exhausted; and a seek
+  outside the ring window keeps the sticky error when the worker is
+  dead (a live worker still gets its error cleared for the refill).
+- `BufferedSource` worker retries `ErrorKind::Interrupted` from the
+  inner source per the std `Read` convention instead of treating it as
+  fatal and killing the prefetch stream.
 - `slice:` URI parser enforces the canonical decimal grammar for
   `offset` and `length`: ASCII digits only, no sign, no leading zeros
   (`"0"` alone stays valid). Previously the tokens went through

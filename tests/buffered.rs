@@ -296,3 +296,188 @@ fn prefetch_timeout_surfaces_when_worker_stalls() {
     // Release the blocked worker so drop() joins promptly.
     stop.store(true, Ordering::SeqCst);
 }
+
+/// Inner source that serves `good` bytes, then fails every subsequent
+/// read with the given error kind. Reports a total length larger than
+/// the good region so the worker keeps trying (and hits the failure)
+/// instead of declaring EOF.
+struct FailAfter {
+    good: Vec<u8>,
+    pos: u64,
+    reported_len: u64,
+    kind: std::io::ErrorKind,
+}
+
+impl Read for FailAfter {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let good_len = self.good.len() as u64;
+        if self.pos < good_len {
+            let start = self.pos as usize;
+            let n = buf.len().min(self.good.len() - start);
+            buf[..n].copy_from_slice(&self.good[start..start + n]);
+            self.pos += n as u64;
+            return Ok(n);
+        }
+        Err(std::io::Error::new(self.kind, "synthetic inner failure"))
+    }
+}
+
+impl Seek for FailAfter {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let new = match from {
+            SeekFrom::Start(n) => n,
+            SeekFrom::End(d) => self.reported_len.checked_add_signed(d).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek out of range")
+            })?,
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek out of range")
+            })?,
+        };
+        self.pos = new;
+        Ok(new)
+    }
+}
+
+#[test]
+fn worker_error_is_sticky_and_immediate() {
+    use std::time::{Duration, Instant};
+
+    let good = ramp(8 * 1024);
+    let inner = Box::new(FailAfter {
+        good: good.clone(),
+        pos: 0,
+        reported_len: 1024 * 1024,
+        kind: std::io::ErrorKind::ConnectionReset,
+    });
+    let mut buf = BufferedSource::builder()
+        .capacity(0)
+        .prefetch_timeout(Duration::from_secs(5))
+        .build(inner)
+        .unwrap();
+
+    // The good region streams fine.
+    let mut head = vec![0u8; good.len()];
+    buf.read_exact(&mut head).unwrap();
+    assert_eq!(head, good);
+
+    // First read past the good region: the worker's failure surfaces
+    // with its original kind and message.
+    let mut probe = [0u8; 16];
+    let e1 = buf.read(&mut probe).expect_err("must surface worker error");
+    assert_eq!(e1.kind(), std::io::ErrorKind::ConnectionReset);
+    assert!(e1.to_string().contains("synthetic inner failure"));
+
+    // Second read: the error must be STICKY — re-surfaced immediately,
+    // not converted into a prefetch TimedOut after the 5 s wait (the
+    // worker is dead; no data can ever arrive).
+    let t0 = Instant::now();
+    let e2 = buf.read(&mut probe).expect_err("error must stay sticky");
+    assert_eq!(e2.kind(), std::io::ErrorKind::ConnectionReset);
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "sticky error must not wait out the prefetch timeout: {:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn seek_after_worker_death_keeps_failing_fast() {
+    use std::time::{Duration, Instant};
+
+    let good = ramp(8 * 1024);
+    let inner = Box::new(FailAfter {
+        good: good.clone(),
+        pos: 0,
+        reported_len: 1024 * 1024,
+        kind: std::io::ErrorKind::BrokenPipe,
+    });
+    let mut buf = BufferedSource::builder()
+        .capacity(0)
+        .prefetch_timeout(Duration::from_secs(5))
+        .build(inner)
+        .unwrap();
+
+    let mut head = vec![0u8; good.len()];
+    buf.read_exact(&mut head).unwrap();
+    let mut probe = [0u8; 16];
+    let _ = buf.read(&mut probe).expect_err("worker failure expected");
+
+    // Prefetched bytes stay valid after the failure: a seek back INTO
+    // the ring's lookback window serves them from the ring.
+    buf.seek(SeekFrom::Start(0)).unwrap();
+    buf.read_exact(&mut probe).unwrap();
+    assert_eq!(probe[..], good[..16]);
+
+    // A seek OUTSIDE the ring window normally clears the sticky error
+    // so a live worker can refill from the new position. The worker is
+    // dead here — the error must survive the seek and the next read
+    // must fail fast instead of waiting out the prefetch timeout for a
+    // refill that cannot happen.
+    buf.seek(SeekFrom::Start(512 * 1024)).unwrap();
+    let t0 = Instant::now();
+    let e = buf
+        .read(&mut probe)
+        .expect_err("dead worker cannot serve after out-of-window seek");
+    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "read after seek must fail fast, took {:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn interrupted_reads_are_retried_not_fatal() {
+    // std Read convention: ErrorKind::Interrupted means "call read
+    // again". The worker must retry instead of killing the stream.
+    struct Interrupting {
+        data: Vec<u8>,
+        pos: u64,
+        hiccups: u32,
+    }
+    impl Read for Interrupting {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.hiccups > 0 && self.pos % 3 == 0 && self.pos < self.data.len() as u64 {
+                self.hiccups -= 1;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted",
+                ));
+            }
+            let start = self.pos as usize;
+            if start >= self.data.len() {
+                return Ok(0);
+            }
+            // Deliberately small reads so the interrupt sites recur.
+            let n = buf.len().min(3).min(self.data.len() - start);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+    impl Seek for Interrupting {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            let len = self.data.len() as u64;
+            let new = match from {
+                SeekFrom::Start(n) => n,
+                SeekFrom::End(d) => len.checked_add_signed(d).unwrap(),
+                SeekFrom::Current(d) => self.pos.checked_add_signed(d).unwrap(),
+            };
+            self.pos = new;
+            Ok(new)
+        }
+    }
+
+    let data = ramp(1024);
+    let inner = Box::new(Interrupting {
+        data: data.clone(),
+        pos: 0,
+        hiccups: 8,
+    });
+    let mut buf = BufferedSource::new(inner, 0).unwrap();
+    let mut out = vec![0u8; data.len()];
+    buf.read_exact(&mut out).unwrap();
+    assert_eq!(out, data);
+    let mut tail = [0u8; 4];
+    assert_eq!(buf.read(&mut tail).unwrap(), 0);
+}

@@ -68,13 +68,31 @@ struct RingState {
     total_len: Option<u64>,
     /// Worker has reached EOF at the current ring tail.
     eof: bool,
-    /// Sticky error from the worker; surfaced on the next reader call.
-    err: Option<io::Error>,
+    /// Sticky error from the worker, stored as `(kind, message)` so it
+    /// can be re-surfaced on EVERY subsequent reader call (`io::Error`
+    /// is not `Clone`). Cleared by a reader seek only while the worker
+    /// is still alive — a dead worker cannot refill the ring, so its
+    /// error must keep surfacing instead of degenerating into a
+    /// misleading `TimedOut` after `prefetch_timeout`.
+    err: Option<(io::ErrorKind, String)>,
+    /// The worker thread has exited (after surfacing an error). Reader
+    /// seeks must not clear `err` in this state: nothing will ever
+    /// refill the ring again.
+    worker_dead: bool,
     /// Reader has set this to ask the worker to discard the ring and
     /// reposition the inner source. The worker clears it when it has acted.
     target_pos: Option<u64>,
     /// Reader is gone; worker should exit promptly.
     stop: bool,
+}
+
+impl RingState {
+    /// Reconstruct the sticky worker error for surfacing to the reader.
+    fn surface_err(&self) -> Option<io::Error> {
+        self.err
+            .as_ref()
+            .map(|(kind, msg)| io::Error::new(*kind, msg.clone()))
+    }
 }
 
 struct Shared {
@@ -193,6 +211,7 @@ impl BufferedSourceBuilder {
             total_len,
             eof: total_len == Some(pos),
             err: None,
+            worker_dead: false,
             target_pos: None,
             stop: false,
         };
@@ -304,7 +323,8 @@ fn worker_loop(shared: Arc<Shared>, mut inner: Box<dyn ReadSeek>, block_size: us
                     drop(st);
                     if let Err(e) = inner.seek(SeekFrom::Start(target)) {
                         let mut st = shared.state.lock().unwrap();
-                        st.err = Some(e);
+                        st.err = Some((e.kind(), e.to_string()));
+                        st.worker_dead = true;
                         shared.not_empty.notify_all();
                         return;
                     }
@@ -346,8 +366,16 @@ fn worker_loop(shared: Arc<Shared>, mut inner: Box<dyn ReadSeek>, block_size: us
                 st.buf.extend(scratch[..n].iter().copied());
                 shared.not_empty.notify_all();
             }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                // Retry per the std `Read` convention: `Interrupted`
+                // means "call read again", not "the stream is broken".
+            }
             Err(e) => {
-                st.err = Some(e);
+                // Fatal: record a sticky (kind, message) copy so EVERY
+                // subsequent reader call re-surfaces it, and mark the
+                // worker dead so reader seeks stop expecting a refill.
+                st.err = Some((e.kind(), e.to_string()));
+                st.worker_dead = true;
                 shared.not_empty.notify_all();
                 return;
             }
@@ -362,11 +390,6 @@ impl Read for BufferedSource {
         }
         let mut st = self.shared.state.lock().unwrap();
         loop {
-            if let Some(e) = st.err.take() {
-                return Err(e);
-            }
-            // Position relative to ring_start.
-            let rel = self.pos.saturating_sub(st.ring_start) as usize;
             // If reader is somehow before ring_start (shouldn't happen — Seek
             // bumps target_pos), surface as InvalidInput.
             if self.pos < st.ring_start {
@@ -375,6 +398,8 @@ impl Read for BufferedSource {
                     "BufferedSource: reader behind ring start",
                 ));
             }
+            // Position relative to ring_start.
+            let rel = (self.pos - st.ring_start) as usize;
             if rel < st.buf.len() {
                 // Hit. Copy out using the VecDeque's two contiguous
                 // slices — this is `copy_from_slice` per segment, vastly
@@ -415,7 +440,16 @@ impl Read for BufferedSource {
                 }
                 return Ok(n);
             }
-            // Miss: at or past the end of the ring.
+            // Miss: at or past the end of the ring. Prefetched bytes
+            // (served above) are always valid even when the worker has
+            // since failed — the error only surfaces once the ring is
+            // exhausted, and it is sticky: NOT taken, so the same
+            // failure keeps re-surfacing on every retry instead of
+            // degrading into a `TimedOut` wait once the (dead) worker
+            // can no longer refill the ring.
+            if let Some(e) = st.surface_err() {
+                return Err(e);
+            }
             if st.eof {
                 return Ok(0);
             }
@@ -468,7 +502,13 @@ impl Seek for BufferedSource {
         st.buf.clear();
         st.ring_start = new_pos;
         st.eof = matches!(total, Some(end) if new_pos >= end);
-        st.err = None;
+        // A live worker will reposition and refill, so its stale error
+        // is cleared. A dead worker can never refill: keep the sticky
+        // error so the next read fails immediately instead of waiting
+        // out the prefetch timeout for data that cannot arrive.
+        if !st.worker_dead {
+            st.err = None;
+        }
         self.pos = new_pos;
         self.shared.not_full.notify_all();
         self.shared.not_empty.notify_all();
