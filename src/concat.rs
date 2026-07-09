@@ -8,16 +8,18 @@
 //! `Read` walking segment boundaries transparently and `Seek` resolving
 //! an absolute offset to `(segment, intra-offset)`.
 //!
-//! Each segment may be one of the same scheme set the [`slice:`](crate::open_slice)
-//! driver accepts as its inner URI:
+//! Each segment is resolved through the shared in-process dispatcher
+//! ([`crate::open_bytes`]), minus `concat:` itself:
 //!
-//! - `file://` and bare paths (delegates to [`open_file`]).
-//! - `mem://<id>` (delegates to [`open_mem`]).
-//! - `data:[<mediatype>][;base64],<bytes>` (delegates to [`open_data`]).
-//! - `slice:<offset>+<length>!<inner-uri>` (delegates to [`open_slice`]).
+//! - `file://` and bare paths (delegates to [`crate::open_file`]).
+//! - `mem://<id>` (delegates to [`crate::open_mem`]).
+//! - `data:[<mediatype>][;base64],<bytes>` (delegates to [`crate::open_data`]).
+//! - `slice:<offset>+<length>!<inner-uri>` (delegates to [`crate::open_slice`]).
 //! - `concat:` itself is **not** allowed as a segment — a nested
 //!   `concat:` would have to embed unescaped `|` separators, which the
-//!   outer split would shred. Use a single flattened list.
+//!   outer split would shred. Use a single flattened list. (The reverse
+//!   nesting — `concat:` as a `slice:` inner — *is* supported, because
+//!   the slice grammar splits on `!`, never on `|`.)
 //!
 //! Grammar (informal):
 //!
@@ -46,10 +48,6 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use oxideav_core::{BytesSource, Error, Result};
 
-use crate::data::open_data;
-use crate::file::open_file;
-use crate::mem::open_mem;
-use crate::slice::open_slice;
 use crate::uri;
 
 /// A composite [`BytesSource`] that reads several sub-sources in order as
@@ -193,26 +191,22 @@ fn segments(rest: &str) -> Result<Vec<&str>> {
 /// the rationale (nested `concat:` would re-enter the outer `|` split).
 fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
     let (seg_scheme, _) = uri::split(seg);
-    // Scheme matching is case-insensitive per RFC 3986 §3.1.
-    if uri::scheme_is(seg_scheme, "file") {
-        open_file(seg)
-    } else if uri::scheme_is(seg_scheme, "mem") {
-        open_mem(seg)
-    } else if uri::scheme_is(seg_scheme, "data") {
-        open_data(seg)
-    } else if uri::scheme_is(seg_scheme, "slice") {
-        open_slice(seg)
-    } else if uri::scheme_is(seg_scheme, "concat") {
-        Err(Error::invalid(format!(
+    // A nested concat: segment gets its own rejection up front — the
+    // shared dispatcher would happily open it, but a nested concat URI
+    // cannot survive the outer '|' split (its own separators were
+    // already shredded), so any such segment reaching this point is a
+    // caller error worth a precise message.
+    if uri::scheme_is(seg_scheme, "concat") {
+        return Err(Error::invalid(format!(
             "concat: segment {seg:?} is itself a concat: URI; nesting concat is not supported \
              because the outer '|' split would shred the inner segment list"
-        )))
-    } else {
-        Err(Error::invalid(format!(
-            "concat: segment {seg:?} uses unsupported scheme {seg_scheme:?}; \
-             only file/mem/data/slice are accepted"
-        )))
+        )));
     }
+    // Everything else goes through the shared in-process dispatcher
+    // (file:// / bare paths, mem://, data:, slice:); unsupported
+    // schemes surface its invalid-data error, other failures keep
+    // their underlying taxonomy (missing file stays an IO error).
+    crate::open_bytes(seg)
 }
 
 /// Open a `concat:<a>|<b>|…` URI as a single [`BytesSource`] that reads

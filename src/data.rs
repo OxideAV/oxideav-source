@@ -84,7 +84,12 @@ pub fn parse(uri_str: &str) -> Result<DataUri> {
     let data = if base64 {
         decode_base64(payload)?
     } else {
-        percent_decode(payload)?
+        // RFC 3986 percent-decoding, shared with the file:// driver's
+        // path decoding — `%HH` → byte 0xHH, everything else passes
+        // through, `+` is NOT translated to space (that is a
+        // `application/x-www-form-urlencoded` convention, not the
+        // RFC 2397 data-URI rule).
+        uri::percent_decode_bytes(payload)?
     };
 
     Ok(DataUri {
@@ -118,53 +123,6 @@ fn strip_base64_suffix(header: &str) -> Option<&str> {
         Some(&header[..header.len() - MARKER.len()])
     } else {
         None
-    }
-}
-
-/// Decode RFC 3986 percent-encoded bytes. `%HH` → byte 0xHH; other
-/// bytes pass through. A `+` is **not** translated to space — that is a
-/// `application/x-www-form-urlencoded` convention, not the RFC 2397
-/// data-URI rule.
-fn percent_decode(s: &str) -> Result<Vec<u8>> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%' {
-            if i + 2 >= bytes.len() {
-                return Err(Error::invalid(format!(
-                    "data:// percent-encoding truncated at offset {i}"
-                )));
-            }
-            let hi = hex_nibble(bytes[i + 1]).ok_or_else(|| {
-                Error::invalid(format!(
-                    "data:// percent-encoding: non-hex digit {:?}",
-                    bytes[i + 1] as char
-                ))
-            })?;
-            let lo = hex_nibble(bytes[i + 2]).ok_or_else(|| {
-                Error::invalid(format!(
-                    "data:// percent-encoding: non-hex digit {:?}",
-                    bytes[i + 2] as char
-                ))
-            })?;
-            out.push((hi << 4) | lo);
-            i += 3;
-        } else {
-            out.push(b);
-            i += 1;
-        }
-    }
-    Ok(out)
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 

@@ -35,6 +35,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `open_bytes(uri)` — registry-free dispatch over the bundled
+  in-process drivers (`file://` / bare paths, `mem://`, `data:`,
+  `slice:`, `concat:`), returning `Box<dyn BytesSource>` directly.
+  This is also now the single dispatch surface `slice:` and `concat:`
+  use to resolve their inner / segment URIs (previously two parallel
+  hand-rolled match blocks), so the three surfaces cannot drift.
+  Driver errors pass through unchanged — a missing file stays an IO
+  error rather than being rewrapped.
+- `slice:` accepts a `concat:` inner URI:
+  `slice:2+4!concat:data:,AB|data:,CDEF` opens the window `[2, 6)` of
+  the concatenation. Unambiguous in this direction because the slice
+  grammar splits on `!`, never on the concat segment separator `|`
+  (the reverse — `concat:` nesting another `concat:` segment — remains
+  rejected).
+- `data:` percent-decoding now shares the RFC 3986 §2.1 decoder with
+  the `file://` path decoding (one implementation instead of two
+  byte-for-byte identical copies); behaviour is unchanged.
 - `SliceUri::open(&self)` — open the window described by a typed
   `SliceUri` directly, without round-tripping through the URI string.
   Resolves `inner` with the matching bundled opener (`file://` / bare

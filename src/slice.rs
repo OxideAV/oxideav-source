@@ -34,15 +34,20 @@
 //! are rejected so that every accepted URI round-trips byte-identically
 //! through [`parse`] → [`SliceUri::format`].
 //!
-//! Supported inner schemes:
+//! Supported inner schemes (resolved via [`crate::open_bytes`]):
 //!
-//! - `file://` and bare paths (delegates to [`open_file`]).
-//! - `mem://<id>` (delegates to [`open_mem`]).
-//! - `data:` (delegates to [`open_data`]).
+//! - `file://` and bare paths (delegates to [`crate::open_file`]).
+//! - `mem://<id>` (delegates to [`crate::open_mem`]).
+//! - `data:` (delegates to [`crate::open_data`]).
 //! - `slice:` (recursive — composition works as one would expect:
 //!   `slice:5+3!slice:10+8!file:///x.bin` first windows the inner file
 //!   to bytes `[10, 18)`, then slices that to its bytes `[5, 8)` which
 //!   are file bytes `[15, 18)`).
+//! - `concat:` — a windowed view over a concatenation, e.g.
+//!   `slice:2+4!concat:data:,AB|data:,CDEF`. Unambiguous here because
+//!   the slice grammar splits on `!`, never on the concat segment
+//!   separator `|`. (The reverse nesting — `slice:` as a `concat:`
+//!   segment — was already supported.)
 //!
 //! The driver does **not** dispatch through a [`SourceRegistry`] — the
 //! registry's opener API takes a plain `fn` pointer with no captured
@@ -57,9 +62,6 @@
 
 use oxideav_core::{BytesSource, Error, Result};
 
-use crate::data::open_data;
-use crate::file::open_file;
-use crate::mem::open_mem;
 use crate::sub::SubSource;
 use crate::uri;
 
@@ -86,9 +88,9 @@ pub struct SliceUri {
     /// zero-length semantics).
     pub length: u64,
     /// Inner URI string. Any of the schemes [`open_slice`] accepts as
-    /// an inner source (`file://` / bare path, `mem://`, `data:`, or a
-    /// nested `slice:`); not validated by the parser beyond
-    /// non-empty and `!`-free for round-trip safety.
+    /// an inner source (`file://` / bare path, `mem://`, `data:`,
+    /// `concat:`, or a nested `slice:`); not validated by the parser
+    /// beyond non-empty and `!`-free for round-trip safety.
     pub inner: String,
 }
 
@@ -242,26 +244,17 @@ fn parse_canonical_u64(s: &str, what: &str) -> Result<u64> {
         .map_err(|e| Error::invalid(format!("slice: {what} {s:?} does not fit in a u64: {e}")))
 }
 
-/// Resolve an inner URI by dispatching to one of the bundled openers.
-/// Limited to schemes whose opener has no captured state: `file://`,
-/// bare paths, `mem://`, `data:`, and recursive `slice:`.
+/// Resolve an inner URI by dispatching to one of the bundled openers,
+/// via [`crate::open_bytes`]. Limited to schemes whose opener has no
+/// captured state: `file://` / bare paths, `mem://`, `data:`, recursive
+/// `slice:`, and `concat:` (a concat inner is unambiguous here because
+/// the slice grammar splits on `!`, never on the concat segment
+/// separator `|`).
 fn open_inner(inner: &str) -> Result<Box<dyn BytesSource>> {
-    let (scheme, _) = uri::split(inner);
-    // Scheme matching is case-insensitive per RFC 3986 §3.1.
-    if uri::scheme_is(scheme, "file") {
-        open_file(inner)
-    } else if uri::scheme_is(scheme, "mem") {
-        open_mem(inner)
-    } else if uri::scheme_is(scheme, "data") {
-        open_data(inner)
-    } else if uri::scheme_is(scheme, "slice") {
-        open_slice(inner)
-    } else {
-        Err(Error::invalid(format!(
-            "slice: inner URI uses unsupported scheme {scheme:?}; \
-             only file/mem/data/slice are accepted as inner sources"
-        )))
-    }
+    // Errors pass through unchanged so the underlying taxonomy is
+    // preserved (a missing inner file stays an IO error, an unknown
+    // scheme stays the dispatcher's invalid-data error).
+    crate::open_bytes(inner)
 }
 
 /// Open a `slice:<offset>+<length>!<inner-uri>` URI.
@@ -478,6 +471,51 @@ mod tests {
         // "http://" inner is not dispatchable without registry context.
         let r = open_slice("slice:0+10!http://example.com/x");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn concat_inner_accepted() {
+        // A concat: inner is unambiguous inside slice: — the slice
+        // grammar splits on '!', never on '|'. Window [2, 6) of the
+        // concatenation "AB" + "CDEF" = "ABCDEF" is "CDEF".
+        let mut r = open_slice("slice:2+4!concat:data:,AB|data:,CDEF").unwrap();
+        let mut out = vec![0u8; 4];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(&out, b"CDEF");
+        // EOF right after the window.
+        let mut extra = [0u8; 1];
+        assert_eq!(r.read(&mut extra).unwrap(), 0);
+    }
+
+    #[test]
+    fn concat_inner_spanning_segment_boundary() {
+        // Window [1, 4) of "AB" + "CD" + "EF" spans all three segments:
+        // "BCDE" minus the last byte → offset 1 length 4 = "BCDE".
+        mem::put("slice-cc-b", b"CD".to_vec());
+        let mut r = open_slice("slice:1+4!concat:data:,AB|mem://slice-cc-b|data:,EF").unwrap();
+        let mut out = vec![0u8; 4];
+        r.read_exact(&mut out).unwrap();
+        assert_eq!(&out, b"BCDE");
+        mem::remove("slice-cc-b");
+    }
+
+    #[test]
+    fn concat_inner_window_past_end_rejected() {
+        // Bounds checks still apply through the composite: total is 4.
+        let r = open_slice("slice:2+3!concat:data:,AB|data:,CD");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn concat_inner_seekable() {
+        // Seeks inside the slice window resolve through the composite.
+        let mut r = open_slice("slice:1+4!concat:data:,AB|data:,CDEF").unwrap();
+        r.seek(SeekFrom::Start(2)).unwrap(); // window[2] == composite[3] == 'D'
+        let mut byte = [0u8; 1];
+        r.read_exact(&mut byte).unwrap();
+        assert_eq!(byte[0], b'D');
+        let end = r.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(end, 4);
     }
 
     #[test]

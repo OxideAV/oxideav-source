@@ -29,9 +29,14 @@
 //!   one seekable byte stream (de-facto `concat:` shape; no on-wire
 //!   spec).
 //! - **`slice:<offset>+<length>!<inner-uri>`** — URI-level windowed view
-//!   over an inner `file://` / `mem://` / `data:` / `slice:` source.
-//!   Pipelines can address a byte-range sub-stream without first
+//!   over an inner `file://` / `mem://` / `data:` / `slice:` / `concat:`
+//!   source. Pipelines can address a byte-range sub-stream without first
 //!   materialising the inner source.
+//!
+//! All five schemes are also reachable without a registry through the
+//! [`open_bytes`] free function, which is the same dispatch surface the
+//! `slice:` and `concat:` drivers use to resolve their inner / segment
+//! URIs.
 
 pub use oxideav_core::{
     BytesSource, FrameSource, PacketSource, ReadSeek, SourceOutput, SourceRegistry,
@@ -58,6 +63,42 @@ pub use mem::open_mem;
 pub use scope::{open_file_scoped, FileScope};
 pub use slice::{open_slice, parse as parse_slice_uri, SliceUri};
 pub use sub::{stream_len, SubSource};
+
+/// Open a URI with the bundled in-process drivers, without constructing
+/// a [`SourceRegistry`]. Dispatches on the URI scheme
+/// (case-insensitively, per RFC 3986 §3.1):
+///
+/// - `file://` and bare paths → [`open_file`]
+/// - `mem://<id>` → [`open_mem`]
+/// - `data:…` → [`open_data`]
+/// - `slice:…` → [`open_slice`]
+/// - `concat:…` → [`open_concat`]
+///
+/// Unknown schemes error. This is the free-function analogue of
+/// `with_defaults().open(uri)` for callers that only ever want a
+/// byte-shaped source: it returns the `Box<dyn BytesSource>` directly
+/// instead of a [`SourceOutput`] to match on, and it is the same
+/// dispatch surface the `slice:` and `concat:` drivers use to resolve
+/// their inner / segment URIs.
+pub fn open_bytes(uri_str: &str) -> oxideav_core::Result<Box<dyn BytesSource>> {
+    let (scheme, _) = uri::split(uri_str);
+    if uri::scheme_is(scheme, "file") {
+        open_file(uri_str)
+    } else if uri::scheme_is(scheme, "mem") {
+        open_mem(uri_str)
+    } else if uri::scheme_is(scheme, "data") {
+        open_data(uri_str)
+    } else if uri::scheme_is(scheme, "slice") {
+        open_slice(uri_str)
+    } else if uri::scheme_is(scheme, "concat") {
+        open_concat(uri_str)
+    } else {
+        Err(oxideav_core::Error::invalid(format!(
+            "no bundled in-process driver for scheme {scheme:?} (URI: {uri_str}); \
+             only file/mem/data/slice/concat are dispatchable without a registry"
+        )))
+    }
+}
 
 /// Build a [`SourceRegistry`] pre-populated with the built-in `file`,
 /// `mem`, `data`, `concat`, and `slice` drivers. Bare paths (without a
