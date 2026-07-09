@@ -15,3 +15,14 @@ categories = ["multimedia"]
 
 [dependencies]
 oxideav-core = "0.1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+# Round 399 benches. Self-contained — every payload is synthesised
+# in-bench (ramp bytes / generated percent- and base64-encodings), so
+# no fixtures and no filesystem beyond a tempfile for the file-backed
+# rows.
+[[bench]]
+name = "read_paths"
+harness = false

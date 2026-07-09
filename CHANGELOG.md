@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `data:` percent-decoding now shares the RFC 3986 §2.1 decoder with
   the `file://` path decoding (one implementation instead of two
   byte-for-byte identical copies); behaviour is unchanged.
+- Criterion benches on the hot read paths (`benches/read_paths.rs`,
+  results in `BENCHMARKS.md`): sequential-read throughput per shape
+  (mem ~59 GiB/s; slice / 16-segment concat within 4–6 % of it;
+  BufferedSource ring ~9.8 GiB/s), BufferedSource lookback-region
+  back-seek hit (~21 ns), concat cross-segment far seeks (~10 ns),
+  and the URI decode paths (`%HH` ~720 MiB/s, base64 ~428 MiB/s,
+  `parse_slice_uri` ~55 ns/op).
 - Randomised model-based differential tests
   (`tests/model_differential.rs`): every source shape (mem, data,
   slice, concat, slice-over-concat, `SubSource`, `BufferedSource`
