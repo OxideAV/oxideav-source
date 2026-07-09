@@ -38,6 +38,17 @@ pub fn split(uri: &str) -> (&str, &str) {
     ("file", uri)
 }
 
+/// Case-insensitive scheme comparison per RFC 3986 §3.1: scheme names
+/// are case-insensitive and the canonical form is lowercase, so a
+/// driver checking "was I invoked on my own scheme?" must accept
+/// `FILE:`, `File:`, etc. The registry already normalises the scheme to
+/// lowercase for dispatch; this helper keeps the driver-level re-check
+/// consistent with that dispatch instead of rejecting URIs the registry
+/// legitimately routed.
+pub fn scheme_is(scheme: &str, want: &str) -> bool {
+    scheme.eq_ignore_ascii_case(want)
+}
+
 /// Returns `true` if `uri` starts with an explicit `file:` or `file://`
 /// scheme prefix (case-insensitive on the scheme letters). Used to gate
 /// percent-decoding to URI-form inputs only — bare paths are passed
@@ -153,6 +164,18 @@ mod tests {
             split("C:\\Users\\file.mp4"),
             ("file", "C:\\Users\\file.mp4")
         );
+    }
+
+    #[test]
+    fn scheme_is_case_insensitive() {
+        assert!(scheme_is("file", "file"));
+        assert!(scheme_is("FILE", "file"));
+        assert!(scheme_is("File", "file"));
+        assert!(scheme_is("MEM", "mem"));
+        assert!(scheme_is("Data", "data"));
+        assert!(!scheme_is("files", "file"));
+        assert!(!scheme_is("fil", "file"));
+        assert!(!scheme_is("", "file"));
     }
 
     #[test]

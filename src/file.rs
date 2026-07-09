@@ -25,7 +25,7 @@ use crate::uri;
 ///   (percent-decoded — `%20` becomes a space, etc. per RFC 3986 §2.1).
 pub fn open_file(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
-    if scheme != "file" {
+    if !uri::scheme_is(scheme, "file") {
         return Err(Error::invalid(format!(
             "file driver invoked on non-file URI: {uri_str}"
         )));

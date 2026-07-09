@@ -64,7 +64,7 @@ pub fn clear() {
 /// `Vec<u8>` copy.
 pub fn open_mem(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
-    if scheme != "mem" {
+    if !uri::scheme_is(scheme, "mem") {
         return Err(Error::invalid(format!(
             "mem driver invoked on non-mem URI: {uri_str}"
         )));

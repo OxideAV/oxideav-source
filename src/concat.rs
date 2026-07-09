@@ -193,19 +193,25 @@ fn segments(rest: &str) -> Result<Vec<&str>> {
 /// the rationale (nested `concat:` would re-enter the outer `|` split).
 fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
     let (seg_scheme, _) = uri::split(seg);
-    match seg_scheme {
-        "file" => open_file(seg),
-        "mem" => open_mem(seg),
-        "data" => open_data(seg),
-        "slice" => open_slice(seg),
-        "concat" => Err(Error::invalid(format!(
+    // Scheme matching is case-insensitive per RFC 3986 §3.1.
+    if uri::scheme_is(seg_scheme, "file") {
+        open_file(seg)
+    } else if uri::scheme_is(seg_scheme, "mem") {
+        open_mem(seg)
+    } else if uri::scheme_is(seg_scheme, "data") {
+        open_data(seg)
+    } else if uri::scheme_is(seg_scheme, "slice") {
+        open_slice(seg)
+    } else if uri::scheme_is(seg_scheme, "concat") {
+        Err(Error::invalid(format!(
             "concat: segment {seg:?} is itself a concat: URI; nesting concat is not supported \
              because the outer '|' split would shred the inner segment list"
-        ))),
-        other => Err(Error::invalid(format!(
-            "concat: segment {seg:?} uses unsupported scheme {other:?}; \
+        )))
+    } else {
+        Err(Error::invalid(format!(
+            "concat: segment {seg:?} uses unsupported scheme {seg_scheme:?}; \
              only file/mem/data/slice are accepted"
-        ))),
+        )))
     }
 }
 
@@ -215,7 +221,7 @@ fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
 /// `slice:` URI.
 pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, rest) = uri::split(uri_str);
-    if scheme != "concat" {
+    if !uri::scheme_is(scheme, "concat") {
         return Err(Error::invalid(format!(
             "concat driver invoked on non-concat URI: {uri_str}"
         )));

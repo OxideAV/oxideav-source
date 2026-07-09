@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Scheme matching in every bundled driver is now case-insensitive per
+  RFC 3986 §3.1. `reg.open("MEM://id")` (and `FILE:`, `DATA:`, `SLICE:`,
+  `CONCAT:` in any case mix) previously failed with "driver invoked on
+  non-<scheme> URI": the registry normalises the scheme to lowercase
+  for dispatch, but each driver re-split the URI and compared the
+  scheme case-sensitively, rejecting URIs the registry had legitimately
+  routed to it. The fix also covers `FileScope::resolve` and the
+  inner-URI / segment dispatch inside `slice:` and `concat:`, so
+  `SLICE:2+3!MEM://id` and `CONCAT:DATA:,a|MEM://b` now open. The
+  wrong-driver guard is unchanged — `open_mem("FILE:///x")` still
+  errors. New helper `uri::scheme_is` (crate-internal surface) keeps
+  the driver-level re-check aligned with registry dispatch.
+
 ### Added
 
 - `SliceUri::open(&self)` — open the window described by a typed

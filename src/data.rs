@@ -62,7 +62,7 @@ pub struct DataUri {
 /// shapes. Rejects URIs that lack the mandatory `,` separator.
 pub fn parse(uri_str: &str) -> Result<DataUri> {
     let (scheme, rest) = uri::split(uri_str);
-    if scheme != "data" {
+    if !uri::scheme_is(scheme, "data") {
         return Err(Error::invalid(format!(
             "data driver invoked on non-data URI: {uri_str}"
         )));

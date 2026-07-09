@@ -157,7 +157,7 @@ impl std::fmt::Display for SliceUri {
 /// empty inner reference.
 pub fn parse(uri_str: &str) -> Result<SliceUri> {
     let (scheme, rest) = uri::split(uri_str);
-    if scheme != "slice" {
+    if !uri::scheme_is(scheme, "slice") {
         return Err(Error::invalid(format!(
             "slice driver invoked on non-slice URI: {uri_str}"
         )));
@@ -222,15 +222,20 @@ fn parse_header(rest: &str) -> Result<SliceHeader<'_>> {
 /// bare paths, `mem://`, `data:`, and recursive `slice:`.
 fn open_inner(inner: &str) -> Result<Box<dyn BytesSource>> {
     let (scheme, _) = uri::split(inner);
-    match scheme {
-        "file" => open_file(inner),
-        "mem" => open_mem(inner),
-        "data" => open_data(inner),
-        "slice" => open_slice(inner),
-        other => Err(Error::invalid(format!(
-            "slice: inner URI uses unsupported scheme {other:?}; \
+    // Scheme matching is case-insensitive per RFC 3986 §3.1.
+    if uri::scheme_is(scheme, "file") {
+        open_file(inner)
+    } else if uri::scheme_is(scheme, "mem") {
+        open_mem(inner)
+    } else if uri::scheme_is(scheme, "data") {
+        open_data(inner)
+    } else if uri::scheme_is(scheme, "slice") {
+        open_slice(inner)
+    } else {
+        Err(Error::invalid(format!(
+            "slice: inner URI uses unsupported scheme {scheme:?}; \
              only file/mem/data/slice are accepted as inner sources"
-        ))),
+        )))
     }
 }
 

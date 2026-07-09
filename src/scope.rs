@@ -119,7 +119,7 @@ impl FileScope {
     /// path on success.
     pub fn resolve(&self, uri_str: &str) -> Result<PathBuf> {
         let (scheme, rest) = uri::split(uri_str);
-        if scheme != "file" {
+        if !uri::scheme_is(scheme, "file") {
             return Err(Error::invalid(format!(
                 "FileScope cannot resolve non-file URI: {uri_str}"
             )));
