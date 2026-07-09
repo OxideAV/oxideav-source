@@ -146,6 +146,10 @@ fn run_suite(label: &str, payload: &[u8], open: &dyn Fn() -> Box<dyn BytesSource
         assert_eq!(p, 7, "{label}: Current(+3) from 4");
         let p = src.seek(SeekFrom::Current(-5)).unwrap();
         assert_eq!(p, 2, "{label}: Current(-5) from 7");
+        // Deliberate Current(0): the battery asserts it behaves as a
+        // pure position query (stream_position is defined in terms of
+        // it, but a driver could still get the raw form wrong).
+        #[allow(clippy::seek_from_current)]
         let p = src.seek(SeekFrom::Current(0)).unwrap();
         assert_eq!(p, 2, "{label}: Current(0) is a position query");
         let mut byte = [0u8; 1];
