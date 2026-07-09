@@ -15,8 +15,8 @@
 //!
 //! ```text
 //! sliceurl  = "slice:" offset "+" length "!" inner-uri
-//! offset    = 1*DIGIT          ; decimal u64
-//! length    = 1*DIGIT          ; decimal u64
+//! offset    = "0" / ( %x31-39 *DIGIT )   ; canonical decimal u64
+//! length    = "0" / ( %x31-39 *DIGIT )   ; canonical decimal u64
 //! inner-uri = <a file path or any supported scheme except "slice:" itself
 //!              when "!"-encoded inside the slice payload would re-enter>
 //! ```
@@ -27,6 +27,12 @@
 //! when the inner URI carries its own `:` and `://`. A literal `!` inside
 //! an inner URI is not supported; the first `!` after the `length` token
 //! is treated as the separator.
+//!
+//! `offset` and `length` are **canonical** decimal integers: ASCII
+//! digits only, no sign, no leading zeros. A leading `+` (which
+//! `str::parse::<u64>()` would admit) and zero-padded forms like `007`
+//! are rejected so that every accepted URI round-trips byte-identically
+//! through [`parse`] → [`SliceUri::format`].
 //!
 //! Supported inner schemes:
 //!
@@ -193,16 +199,8 @@ fn parse_header(rest: &str) -> Result<SliceHeader<'_>> {
     let (off_s, len_with_plus) = range.split_at(plus);
     let len_s = &len_with_plus[1..]; // skip '+'
 
-    let offset: u64 = off_s.parse().map_err(|e| {
-        Error::invalid(format!(
-            "slice: offset {off_s:?} is not a non-negative decimal u64: {e}"
-        ))
-    })?;
-    let length: u64 = len_s.parse().map_err(|e| {
-        Error::invalid(format!(
-            "slice: length {len_s:?} is not a non-negative decimal u64: {e}"
-        ))
-    })?;
+    let offset = parse_canonical_u64(off_s, "offset")?;
+    let length = parse_canonical_u64(len_s, "length")?;
 
     if inner.is_empty() {
         return Err(Error::invalid(
@@ -215,6 +213,33 @@ fn parse_header(rest: &str) -> Result<SliceHeader<'_>> {
         length,
         inner,
     })
+}
+
+/// Parse a canonical decimal u64: ASCII digits only, no sign, no
+/// leading zeros (a multi-digit token starting with `0` is rejected;
+/// the single digit `"0"` is fine).
+///
+/// Deliberately stricter than `str::parse::<u64>()`, which admits a
+/// leading `+` — accepting `slice:1++2!…` or `slice:007+010!…` would
+/// break the documented invariant that `parse` → `format` reproduces a
+/// byte-identical URI for every input the parser accepts (`format`
+/// always emits the canonical digit string).
+fn parse_canonical_u64(s: &str, what: &str) -> Result<u64> {
+    if s.is_empty() {
+        return Err(Error::invalid(format!("slice: {what} is empty")));
+    }
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::invalid(format!(
+            "slice: {what} {s:?} is not a non-negative decimal u64"
+        )));
+    }
+    if s.len() > 1 && s.starts_with('0') {
+        return Err(Error::invalid(format!(
+            "slice: {what} {s:?} has leading zeros; the canonical form has none"
+        )));
+    }
+    s.parse()
+        .map_err(|e| Error::invalid(format!("slice: {what} {s:?} does not fit in a u64: {e}")))
 }
 
 /// Resolve an inner URI by dispatching to one of the bundled openers.
@@ -319,6 +344,53 @@ mod tests {
     fn parse_negative_offset_rejected() {
         // u64 doesn't accept '-'; ensure the error path triggers.
         assert!(parse_header("-1+20!mem://x").is_err());
+    }
+
+    #[test]
+    fn parse_plus_signed_numbers_rejected() {
+        // `str::parse::<u64>()` admits a leading '+'; the canonical
+        // grammar does not — accepting "1++2" would parse as (1, 2) and
+        // then format back as "1+2", breaking byte-identical round-trip.
+        assert!(parse_header("1++2!mem://x").is_err());
+        assert!(parse_header("+1+2!mem://x").is_err());
+    }
+
+    #[test]
+    fn parse_leading_zeros_rejected() {
+        // Zero-padded forms would also break the round-trip invariant:
+        // "007" would format back as "7".
+        assert!(parse_header("007+10!mem://x").is_err());
+        assert!(parse_header("7+010!mem://x").is_err());
+        assert!(parse_header("00+1!mem://x").is_err());
+        // The single digit "0" itself is canonical and stays accepted.
+        let h = parse_header("0+0!mem://x").unwrap();
+        assert_eq!((h.offset, h.length), (0, 0));
+    }
+
+    #[test]
+    fn parse_u64_overflow_rejected() {
+        // u64::MAX is 18446744073709551615; one more must error, not wrap.
+        assert!(parse_header("18446744073709551616+1!mem://x").is_err());
+        assert!(parse_header("1+99999999999999999999!mem://x").is_err());
+        // u64::MAX itself is fine.
+        let h = parse_header("18446744073709551615+0!mem://x").unwrap();
+        assert_eq!(h.offset, u64::MAX);
+    }
+
+    #[test]
+    fn parse_non_ascii_digits_rejected() {
+        // Only ASCII digits form the canonical grammar; other Unicode
+        // decimal digits must not slip through.
+        assert!(parse_header("١+1!mem://x").is_err());
+        assert!(parse_header("1+٢!mem://x").is_err());
+    }
+
+    #[test]
+    fn parse_whitespace_in_numbers_rejected() {
+        assert!(parse_header(" 1+2!mem://x").is_err());
+        assert!(parse_header("1 +2!mem://x").is_err());
+        assert!(parse_header("1+ 2!mem://x").is_err());
+        assert!(parse_header("1+2 !mem://x").is_err());
     }
 
     #[test]

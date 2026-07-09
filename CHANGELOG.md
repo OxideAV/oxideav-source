@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `slice:` URI parser enforces the canonical decimal grammar for
+  `offset` and `length`: ASCII digits only, no sign, no leading zeros
+  (`"0"` alone stays valid). Previously the tokens went through
+  `str::parse::<u64>()`, which admits a leading `+` and zero-padding,
+  so `slice:1++2!…` and `slice:007+010!…` were accepted — and then
+  violated the documented invariant that `parse` → `format` reproduces
+  a byte-identical URI for every accepted input (`format` always emits
+  the canonical digit string). Non-canonical forms now fail with a
+  precise error; overflow (`> u64::MAX`) and non-ASCII digits are
+  rejected as before.
+
 - Scheme matching in every bundled driver is now case-insensitive per
   RFC 3986 §3.1. `reg.open("MEM://id")` (and `FILE:`, `DATA:`, `SLICE:`,
   `CONCAT:` in any case mix) previously failed with "driver invoked on
