@@ -17,13 +17,20 @@ slot into the same opener API.
 | `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list, with optional `deny_dir` carve-outs that override allow-list matches; blocks `..` traversals through symlinks; same RFC 3986 §2.1 percent-decoding for URI-form inputs |
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
-| `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI (same set the `slice:` driver accepts as inner). Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected. |
-| `slice:<offset>+<length>!<inner-uri>` | `open_slice` | URI-level windowed view: `[offset, offset + length)` of `<inner-uri>` mapped onto `[0, length)`. The inner URI may be a `file://` / bare path, `mem://`, `data:`, or another `slice:` (recursive composition). Equivalent to constructing a `SubSource` programmatically, but expressible as a single URI string for CLI flags and config files. |
+| `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI. Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected. |
+| `slice:<offset>+<length>!<inner-uri>` | `open_slice` | URI-level windowed view: `[offset, offset + length)` of `<inner-uri>` mapped onto `[0, length)`. The inner URI may be a `file://` / bare path, `mem://`, `data:`, another `slice:` (recursive composition), or a `concat:` (a window over a concatenation — unambiguous because the slice grammar splits on `!`, never on `\|`). `offset`/`length` are canonical decimals (no sign, no leading zeros). Equivalent to constructing a `SubSource` programmatically, but expressible as a single URI string for CLI flags and config files. |
 | `http://`, `https://` | provided by [oxideav-http](https://github.com/OxideAV/oxideav-http) | registered separately by that crate |
+
+Scheme names are matched **case-insensitively** per RFC 3986 §3.1
+(`FILE:///x`, `MEM://id`, `DATA:,…` all open); the typed formatters
+emit the canonical lowercase form.
 
 `with_defaults()` pre-populates a registry with the `file`, `mem`,
 `data`, `concat`, and `slice` drivers (the `file` opener in its unscoped
-form).
+form). The same five schemes are reachable without a registry through
+the `open_bytes(uri)` free function, which returns the
+`Box<dyn BytesSource>` directly and is the same dispatch surface the
+`slice:` / `concat:` drivers use for their inner and segment URIs.
 For server-side use, build an empty registry and install a `FileScope`
 instead:
 
@@ -88,10 +95,17 @@ Defaults are 1 MiB capacity, 256 KiB block size, 30 s prefetch timeout,
 always able to make forward progress (capacity ≥ 4 × block, block ≥
 4 KiB, timeout ≥ 1 ms, lookback strictly less than 1).
 
-## Programmatic slice-URI construction
+Failure semantics: a fatal error from the inner source is **sticky** —
+already-prefetched bytes (including lookback-window back-seeks) stay
+readable, and once the ring is exhausted every read re-surfaces the
+original error `(kind, message)` immediately instead of waiting out the
+prefetch timeout. `ErrorKind::Interrupted` from the inner source is
+retried per the std `Read` convention, not treated as fatal.
 
-`slice:` URIs can be built and inspected without string-formatting via
-the public `SliceUri` type (parallel to `DataUri` for `data:`):
+## Typed URI values — `DataUri`, `SliceUri`, `ConcatUri`
+
+Each composable scheme has a public typed view so URIs can be built and
+inspected without string-formatting. `slice:` example:
 
 ```rust,no_run
 use oxideav_source::{parse_slice_uri, SliceUri};
@@ -120,10 +134,18 @@ let _reader = s.open().unwrap(); // == open_slice(&s.format())
 
 `open_slice(uri_str)` is itself `parse_slice_uri(uri_str)?.open()`, so the
 string and typed entry points share one open path and stay in lock-step.
+`concat:` has the same triad: `parse_concat_uri(uri)` →
+`ConcatUri { segments }`, `ConcatUri::new(segments)` /
+`format()` / `open()`, with `open_concat` defined as
+`parse(uri)?.open()`.
 
-`parse → format` is byte-identical for every URI the parser accepts;
-`SliceUri::new` rejects an empty inner and an inner containing a literal
-`!` (which would re-enter the grammar at the wrong split).
+`parse → format` is byte-identical for every canonical URI the parser
+accepts (equivalent `SLICE:` / `slice://` spellings normalise to the
+canonical form; `parse(format(x)) == x` always). The constructors
+reject only what breaks the grammar round-trip: `SliceUri::new` an
+empty inner or an inner containing a literal `!`; `ConcatUri::new` an
+empty list, an empty segment, or a segment containing `|`. Scheme
+validity stays an open-time concern.
 
 ## SubSource — windowed view
 
@@ -150,6 +172,31 @@ let mut sample = SubSource::new(inner, 4_321_000, 34_112).unwrap();
 // `sample` now behaves like a `Read + Seek` source over [0, 34_112).
 # let _ = &mut sample;
 ```
+
+## Testing & benchmarks
+
+Beyond per-driver unit/integration tests, three cross-cutting suites
+pin the I/O contract:
+
+- **Conformance battery** (`tests/conformance.rs`) — one behavioural
+  suite (EOF idempotence, zero-sized-buffer reads, seek-past-end
+  tolerance + recovery, seek-underflow errors that preserve the
+  cursor, `SeekFrom` arithmetic, rewind re-read, exact position
+  tracking) run against 17 source shapes, from plain drivers to
+  slice-over-concat composites and the streaming `BufferedSource`.
+- **Model differential** (`tests/model_differential.rs`) — fixed-seed
+  random op streams driven in lockstep against a `Cursor<Vec<u8>>`
+  model; positions, bytes, and seek ok-ness must agree after every op
+  on 8 shapes.
+- **Hostile input** (`tests/hostile_input.rs`) — separator-biased byte
+  soup (NUL, multi-byte UTF-8, RTL override) against the parsers: no
+  panics, canonical round-trip, parse-format-parse fixpoint,
+  500-deep nested-slice recursion, truncated percent escapes.
+
+`cargo bench --bench read_paths` measures the hot paths — numbers in
+[BENCHMARKS.md](BENCHMARKS.md) (mem ~59 GiB/s sequential; slice /
+16-segment concat within 4–6 %; prefetch ring ~9.8 GiB/s; `%HH` decode
+~720 MiB/s; base64 ~428 MiB/s; slice grammar parse ~55 ns).
 
 ## Status
 
