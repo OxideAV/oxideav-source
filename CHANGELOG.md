@@ -52,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `data:` percent-decoding now shares the RFC 3986 §2.1 decoder with
   the `file://` path decoding (one implementation instead of two
   byte-for-byte identical copies); behaviour is unchanged.
+- Randomised model-based differential tests
+  (`tests/model_differential.rs`): every source shape (mem, data,
+  slice, concat, slice-over-concat, `SubSource`, `BufferedSource`
+  incl. a streaming run through a 16 KiB ring) is driven with
+  fixed-seed pseudo-random op sequences — reads of random sizes,
+  `Start`/`Current`/`End` seeks including `u64::MAX` and `i64::MIN`
+  extremes — in lockstep with a `Cursor<Vec<u8>>` model, requiring
+  identical seek ok-ness, positions, bytes, and `stream_position`
+  after every operation.
+- Hostile-input hardening sweep (`tests/hostile_input.rs`):
+  deterministic fuzzing of `parse_slice_uri` / `parse_data_uri` /
+  `open_bytes` with separator-biased byte soup plus multi-byte UTF-8
+  and RTL-override characters — asserts no panics, byte-identical
+  slice round-trip on every accepted input, parse-format-parse
+  fixpoint, 500-deep nested-slice recursion safety, and truncated
+  percent-escape alignment safety.
 - Shared `Read + Seek` conformance suite (`tests/conformance.rs`):
   one behavioural battery — EOF idempotence, zero-sized-buffer reads,
   seek-past-end tolerance + recovery, seek-underflow error with
