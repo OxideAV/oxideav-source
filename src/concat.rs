@@ -209,11 +209,101 @@ fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
     crate::open_bytes(seg)
 }
 
-/// Open a `concat:<a>|<b>|…` URI as a single [`BytesSource`] that reads
-/// the segments back-to-back. Each segment may be a bare path, a
-/// `file://` URL, a `mem://<id>` reference, a `data:` literal, or a
-/// `slice:` URI.
-pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
+/// Parsed components of a `concat:` URI.
+///
+/// Completes the typed-URI triad next to [`crate::DataUri`] and
+/// [`crate::SliceUri`]: a public typed view over the parsed segment
+/// list, so callers that want to inspect, filter, or re-order segments
+/// (CLI parsers, playlist tooling, fixture builders) can do so without
+/// re-implementing the `|` grammar.
+///
+/// Round-trip: [`parse`] followed by [`ConcatUri::format`] reproduces a
+/// byte-identical URI for every canonical input the parser accepts
+/// (lowercase `concat:` scheme, no `//` after the colon) — the split
+/// on `|` and re-join are exact inverses because empty segments are
+/// rejected and segments cannot contain `|`. The equivalent `CONCAT:`
+/// / `concat://` spellings normalise to the canonical form.
+/// `parse(format(x)) == x` holds for every accepted input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConcatUri {
+    /// Segment URIs in concatenation order. Each is any scheme
+    /// [`open_concat`] accepts as a segment (`file://` / bare path,
+    /// `mem://`, `data:`, `slice:`); the parser only guarantees
+    /// non-empty and `|`-free (scheme validity, including the nested
+    /// `concat:` rejection, is an open-time check).
+    pub segments: Vec<String>,
+}
+
+impl ConcatUri {
+    /// Build a `ConcatUri` from a segment list. Rejects an empty list
+    /// (the URI form has no zero-segment spelling), any empty segment
+    /// (the grammar reserves that as a typo guard), and any segment
+    /// containing a literal `|` (it would be shredded by the split on
+    /// re-parse, so the value could not round-trip).
+    ///
+    /// Mirrors [`crate::SliceUri::new`]'s philosophy: only grammar
+    /// safety is validated here; whether each segment's scheme is
+    /// openable (and the nested-`concat:` rejection) is [`open`](Self::open)'s
+    /// job, exactly as for the string entry point.
+    pub fn new<I, S>(segments: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let segments: Vec<String> = segments.into_iter().map(Into::into).collect();
+        if segments.is_empty() {
+            return Err(Error::invalid("concat: URI requires at least one segment"));
+        }
+        for seg in &segments {
+            if seg.is_empty() {
+                return Err(Error::invalid("concat: URI segment cannot be empty"));
+            }
+            if seg.contains('|') {
+                return Err(Error::invalid(format!(
+                    "concat: URI segment {seg:?} contains a '|'; a literal '|' inside a \
+                     segment cannot round-trip because the grammar splits on every '|'"
+                )));
+            }
+        }
+        Ok(Self { segments })
+    }
+
+    /// Format this `ConcatUri` back into its canonical
+    /// `concat:<a>|<b>|…` string form. [`parse`] followed by `format`
+    /// reproduces a byte-identical URI for every canonical input; the
+    /// equivalent `CONCAT:` / `concat://` spellings the parser also
+    /// accepts normalise to this form.
+    pub fn format(&self) -> String {
+        format!("concat:{}", self.segments.join("|"))
+    }
+
+    /// Open the concatenation described by this typed value directly,
+    /// without round-tripping through the URI string. Each segment is
+    /// resolved through the shared in-process dispatcher (with the
+    /// nested-`concat:` rejection), then presented as one seekable
+    /// stream. The typed analogue of [`open_concat`], and byte-for-byte
+    /// identical to `open_concat(&self.format())`.
+    pub fn open(&self) -> Result<Box<dyn BytesSource>> {
+        let mut parts: Vec<Box<dyn BytesSource>> = Vec::with_capacity(self.segments.len());
+        for seg in &self.segments {
+            parts.push(open_segment(seg)?);
+        }
+        Ok(Box::new(ConcatSource::new(parts)?))
+    }
+}
+
+impl std::fmt::Display for ConcatUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "concat:{}", self.segments.join("|"))
+    }
+}
+
+/// Parse a `concat:` URI into its [`ConcatUri`] components without
+/// opening any segment. Rejects a wrong scheme, an empty segment list,
+/// and empty segments; segment *schemes* are not validated (that is an
+/// open-time concern), matching the `slice:` parser's philosophy
+/// ([`crate::parse_slice_uri`]).
+pub fn parse(uri_str: &str) -> Result<ConcatUri> {
     let (scheme, rest) = uri::split(uri_str);
     if !uri::scheme_is(scheme, "concat") {
         return Err(Error::invalid(format!(
@@ -224,11 +314,21 @@ pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
         return Err(Error::invalid("concat: URI requires at least one segment"));
     }
     let segs = segments(rest)?;
-    let mut parts: Vec<Box<dyn BytesSource>> = Vec::with_capacity(segs.len());
-    for seg in segs {
-        parts.push(open_segment(seg)?);
-    }
-    Ok(Box::new(ConcatSource::new(parts)?))
+    Ok(ConcatUri {
+        segments: segs.into_iter().map(str::to_string).collect(),
+    })
+}
+
+/// Open a `concat:<a>|<b>|…` URI as a single [`BytesSource`] that reads
+/// the segments back-to-back. Each segment may be a bare path, a
+/// `file://` URL, a `mem://<id>` reference, a `data:` literal, or a
+/// `slice:` URI.
+///
+/// Equivalent to [`parse`] followed by [`ConcatUri::open`]: the string
+/// and typed-value entry points share a single open code path and
+/// cannot drift apart.
+pub fn open_concat(uri_str: &str) -> Result<Box<dyn BytesSource>> {
+    parse(uri_str)?.open()
 }
 
 #[cfg(test)]
@@ -502,5 +602,103 @@ mod tests {
         // mirror the slice: driver's same rejection.
         let res = open_concat("concat:http://example.com/a|http://example.com/b");
         assert!(res.is_err());
+    }
+
+    // ---- typed `ConcatUri` parse / format / open ----
+
+    #[test]
+    fn typed_parse_basic() {
+        let c = parse("concat:file:///a|mem://b|data:,C").unwrap();
+        assert_eq!(c.segments, ["file:///a", "mem://b", "data:,C"]);
+    }
+
+    #[test]
+    fn typed_parse_single_segment() {
+        let c = parse("concat:/bare/path.bin").unwrap();
+        assert_eq!(c.segments, ["/bare/path.bin"]);
+    }
+
+    #[test]
+    fn typed_parse_rejections() {
+        assert!(parse("file:///a").is_err(), "wrong scheme");
+        assert!(parse("concat:").is_err(), "no segments");
+        assert!(parse("concat:a||b").is_err(), "empty middle segment");
+        assert!(parse("concat:a|").is_err(), "empty trailing segment");
+    }
+
+    #[test]
+    fn typed_round_trip_byte_identical_for_canonical() {
+        for uri in [
+            "concat:/a",
+            "concat:file:///a|mem://b",
+            "concat:data:,x|slice:0+1!mem://y|/bare",
+        ] {
+            let parsed = parse(uri).expect(uri);
+            assert_eq!(parsed.format(), uri, "round-trip mismatch on {uri}");
+            let again = parse(&parsed.format()).unwrap();
+            assert_eq!(again, parsed, "fixpoint mismatch on {uri}");
+        }
+    }
+
+    #[test]
+    fn typed_round_trip_normalises_equivalent_spellings() {
+        let canonical = parse("concat:mem://a|mem://b").unwrap();
+        for spelling in ["CONCAT:mem://a|mem://b", "concat://mem://a|mem://b"] {
+            let parsed = parse(spelling).expect(spelling);
+            assert_eq!(parsed, canonical, "{spelling} must parse equal");
+            assert_eq!(parsed.format(), "concat:mem://a|mem://b");
+        }
+    }
+
+    #[test]
+    fn typed_constructor_validates_grammar() {
+        assert!(ConcatUri::new(Vec::<String>::new()).is_err(), "empty list");
+        assert!(ConcatUri::new(["a", ""]).is_err(), "empty segment");
+        assert!(
+            ConcatUri::new(["a", "b|c"]).is_err(),
+            "'|' in a segment cannot round-trip"
+        );
+        // Scheme validity is an open-time concern (mirrors SliceUri::new
+        // accepting an http:// inner): the constructor admits it...
+        let c = ConcatUri::new(["http://example.com/x"]).unwrap();
+        // ...and open rejects it.
+        assert!(c.open().is_err());
+    }
+
+    #[test]
+    fn typed_open_matches_open_concat_bytes() {
+        mem::put("concat-typed-a", b"left-".to_vec());
+        mem::put("concat-typed-b", b"right".to_vec());
+        let c = ConcatUri::new(["mem://concat-typed-a", "mem://concat-typed-b"]).unwrap();
+
+        let mut via_typed = c.open().unwrap();
+        let mut a = Vec::new();
+        via_typed.read_to_end(&mut a).unwrap();
+
+        let mut via_string = open_concat(&c.format()).unwrap();
+        let mut b = Vec::new();
+        via_string.read_to_end(&mut b).unwrap();
+
+        assert_eq!(a, b);
+        assert_eq!(a, b"left-right");
+        assert_eq!(
+            c.to_string(),
+            "concat:mem://concat-typed-a|mem://concat-typed-b"
+        );
+        mem::remove("concat-typed-a");
+        mem::remove("concat-typed-b");
+    }
+
+    #[test]
+    fn typed_open_rejects_nested_concat_segment() {
+        // Constructor admits it (grammar-safe: no '|'), open rejects it
+        // with the bespoke nesting message — same split of concerns as
+        // the string path.
+        let c = ConcatUri::new(["concat:a"]).unwrap();
+        let err = match c.open() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("nested concat segment must be rejected at open"),
+        };
+        assert!(err.contains("nesting concat"), "got: {err}");
     }
 }

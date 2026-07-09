@@ -16,7 +16,7 @@
 //! Fixed xorshift seeds keep failures reproducible; iteration counts
 //! shrink under Miri.
 
-use oxideav_source::{open_bytes, parse_data_uri, parse_slice_uri};
+use oxideav_source::{open_bytes, parse_concat_uri, parse_data_uri, parse_slice_uri};
 
 struct XorShift(u64);
 
@@ -106,6 +106,31 @@ fn slice_parser_never_panics_and_round_trips() {
     // The generator includes "slice:0+0!" prefixed soup, so some inputs
     // must actually exercise the accept path — otherwise the round-trip
     // assertions above are vacuous.
+    assert!(accepted > 0, "sweep never hit the accept path");
+}
+
+#[test]
+fn concat_parser_never_panics_and_round_trips() {
+    let mut rng = XorShift::new(0x00cc_a7c0);
+    let mut accepted = 0u32;
+    for _ in 0..ITERS {
+        let uri = random_uri(&mut rng);
+        if let Ok(parsed) = parse_concat_uri(&uri) {
+            accepted += 1;
+            let is_canonical = uri
+                .strip_prefix("concat:")
+                .is_some_and(|r| !r.starts_with("//"));
+            if is_canonical {
+                assert_eq!(
+                    parsed.format(),
+                    uri,
+                    "concat round-trip must be byte-identical for canonical input"
+                );
+            }
+            let again = parse_concat_uri(&parsed.format()).expect("format must re-parse");
+            assert_eq!(again, parsed, "parse-format-parse must be a fixpoint");
+        }
+    }
     assert!(accepted > 0, "sweep never hit the accept path");
 }
 

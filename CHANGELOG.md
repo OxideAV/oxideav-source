@@ -35,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ConcatUri` — public typed view of a parsed `concat:` URI,
+  completing the typed-URI triad next to `DataUri` and `SliceUri`.
+  `parse_concat_uri(uri)` returns
+  `ConcatUri { segments: Vec<String> }` without opening any segment;
+  `ConcatUri::new(segments)` validates grammar safety up-front (≥ 1
+  segment, none empty, no literal `|` — the value could not
+  round-trip); `format()` / `Display` emit the canonical
+  `concat:<a>|<b>` form; `open()` is the typed analogue of
+  `open_concat`, which is now defined as `parse(uri)?.open()` so the
+  string and typed entry points share one open path. Segment scheme
+  validity (including the nested-`concat:` rejection) stays an
+  open-time concern, mirroring `SliceUri`. Round-trip contract matches
+  the slice one: canonical inputs are byte-identical, `CONCAT:` /
+  `concat://` spellings normalise, `parse(format(x)) == x` always.
 - `open_bytes(uri)` — registry-free dispatch over the bundled
   in-process drivers (`file://` / bare paths, `mem://`, `data:`,
   `slice:`, `concat:`), returning `Box<dyn BytesSource>` directly.
