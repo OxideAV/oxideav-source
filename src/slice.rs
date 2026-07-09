@@ -73,11 +73,16 @@ use crate::uri;
 /// fixture builders) can do so without re-implementing the grammar.
 ///
 /// Round-trip: [`parse`] followed by [`SliceUri::format`] reproduces a
-/// byte-identical URI string for every input the parser accepts (the
-/// grammar has a single canonical form — no whitespace, no leading
-/// zeros are introduced, and the `!` separator is unambiguous because
-/// inner URIs containing literal `!` are rejected at construction
-/// time).
+/// byte-identical URI string for every **canonical** input the parser
+/// accepts — lowercase `slice:` scheme, no `//` after the colon,
+/// canonical decimal digits (no sign, no leading zeros), and an
+/// unambiguous `!` separator (inner URIs containing a literal `!` are
+/// rejected at construction time). The parser additionally accepts the
+/// RFC 3986 §3.1-equivalent spellings `SLICE:` / `Slice:` (scheme case
+/// is insignificant) and the `slice://` authority-style form; those
+/// normalise to the canonical form on [`format`](SliceUri::format), so
+/// for them `parse → format` is a normalisation rather than an
+/// identity. `parse(format(x)) == x` holds for every accepted input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SliceUri {
     /// Absolute byte offset within the inner source at which the window
@@ -122,10 +127,10 @@ impl SliceUri {
     }
 
     /// Format this `SliceUri` back into its canonical
-    /// `slice:<offset>+<length>!<inner>` string form. The grammar has a
-    /// single canonical form so a [`parse`] followed by [`format`]
-    /// reproduces a byte-identical URI for every input the parser
-    /// accepts.
+    /// `slice:<offset>+<length>!<inner>` string form. [`parse`] followed
+    /// by `format` reproduces a byte-identical URI for every canonical
+    /// input; the equivalent `SLICE:` / `slice://` spellings the parser
+    /// also accepts normalise to this form (see the [`SliceUri`] docs).
     pub fn format(&self) -> String {
         format!("slice:{}+{}!{}", self.offset, self.length, self.inner)
     }
@@ -633,6 +638,27 @@ mod tests {
         ] {
             let parsed = parse(uri).expect(uri);
             assert_eq!(parsed.format(), uri, "round-trip mismatch on {uri}");
+        }
+    }
+
+    #[test]
+    fn typed_round_trip_normalises_equivalent_spellings() {
+        // Scheme case is insignificant (RFC 3986 §3.1) and the `//`
+        // authority-style form is stripped by the splitter; both parse
+        // to the same typed value and format to the canonical form.
+        let canonical = parse("slice:5+7!mem://x").unwrap();
+        for spelling in [
+            "SLICE:5+7!mem://x",
+            "Slice:5+7!mem://x",
+            "slice://5+7!mem://x",
+        ] {
+            let parsed = parse(spelling).expect(spelling);
+            assert_eq!(parsed, canonical, "{spelling} must parse equal");
+            assert_eq!(
+                parsed.format(),
+                "slice:5+7!mem://x",
+                "{spelling} must format to the canonical form"
+            );
         }
     }
 

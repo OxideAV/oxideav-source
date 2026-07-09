@@ -7,10 +7,11 @@
 //! index-slicing panic bait. Three properties:
 //!
 //! 1. **No panic**, ever, on any input (the parsers return `Result`).
-//! 2. **Round-trip**: every `slice:` URI the parser accepts formats
-//!    back byte-identically (the documented canonical-form invariant).
+//! 2. **Round-trip**: every canonical `slice:` URI the parser accepts
+//!    formats back byte-identically; the equivalent `SLICE:` /
+//!    `slice://` spellings normalise to the canonical form.
 //! 3. **Parse-format-parse fixpoint**: re-parsing the formatted form
-//!    yields the same typed value.
+//!    yields the same typed value, for every accepted input.
 //!
 //! Fixed xorshift seeds keep failures reproducible; iteration counts
 //! shrink under Miri.
@@ -83,14 +84,21 @@ fn slice_parser_never_panics_and_round_trips() {
         let uri = random_uri(&mut rng);
         if let Ok(parsed) = parse_slice_uri(&uri) {
             accepted += 1;
-            // Documented invariant: accepted inputs are canonical, so
-            // format() reproduces the input byte-identically...
-            assert_eq!(
-                parsed.format(),
-                uri,
-                "slice round-trip must be byte-identical for accepted input"
-            );
-            // ...and re-parsing is a fixpoint.
+            // Documented invariant: canonical inputs (lowercase scheme,
+            // no `//` after the colon) round-trip byte-identically;
+            // equivalent spellings (SLICE:, slice://) normalise.
+            let is_canonical = uri
+                .strip_prefix("slice:")
+                .is_some_and(|r| !r.starts_with("//"));
+            if is_canonical {
+                assert_eq!(
+                    parsed.format(),
+                    uri,
+                    "slice round-trip must be byte-identical for canonical input"
+                );
+            }
+            // Re-parsing the formatted form is a fixpoint for EVERY
+            // accepted input.
             let again = parse_slice_uri(&parsed.format()).expect("format must re-parse");
             assert_eq!(again, parsed, "parse-format-parse must be a fixpoint");
         }
