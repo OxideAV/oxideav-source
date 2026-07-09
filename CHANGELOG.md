@@ -52,6 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `data:` percent-decoding now shares the RFC 3986 §2.1 decoder with
   the `file://` path decoding (one implementation instead of two
   byte-for-byte identical copies); behaviour is unchanged.
+- Shared `Read + Seek` conformance suite (`tests/conformance.rs`):
+  one behavioural battery — EOF idempotence, zero-sized-buffer reads,
+  seek-past-end tolerance + recovery, seek-underflow error with
+  position preservation, `SeekFrom::End`/`Current` arithmetic,
+  rewind re-read, exact position tracking — run against 17 source
+  shapes: file / mem / data (percent + base64) plain and empty,
+  mid-file `slice:`, zero-length and nested slices, mixed-scheme
+  `concat:` (with a zero-length middle segment), `slice:` over
+  `concat:` spanning both internal boundaries, programmatic
+  `SubSource`, and `BufferedSource` (fits-in-ring, empty, and a
+  512 KiB payload streamed through a 16 KiB ring to exercise the
+  worker-refill and lookback-drop paths).
 - `SliceUri::open(&self)` — open the window described by a typed
   `SliceUri` directly, without round-tripping through the URI string.
   Resolves `inner` with the matching bundled opener (`file://` / bare
