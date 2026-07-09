@@ -79,9 +79,16 @@ pub fn open_mem(uri_str: &str) -> Result<Box<dyn BytesSource>> {
         )));
     }
     let guard = table().read().expect("mem:// table poisoned");
-    let buf = guard
-        .get(id)
-        .ok_or_else(|| Error::invalid(format!("mem:// id '{id}' is not registered")))?;
+    // Taxonomy: the URI is well-formed; the buffer just isn't there.
+    // That is a NotFound lookup miss (like a missing file), not
+    // malformed input — callers branching on the error kind get the
+    // same shape as a failing `file://` open.
+    let buf = guard.get(id).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("mem:// id '{id}' is not registered"),
+        ))
+    })?;
     Ok(Box::new(MemReader::new(Arc::clone(buf))))
 }
 

@@ -93,7 +93,10 @@ pub fn open_bytes(uri_str: &str) -> oxideav_core::Result<Box<dyn BytesSource>> {
     } else if uri::scheme_is(scheme, "concat") {
         open_concat(uri_str)
     } else {
-        Err(oxideav_core::Error::invalid(format!(
+        // Taxonomy: the URI may be perfectly valid (http://…); this
+        // dispatcher just has no driver for it. That is `Unsupported`,
+        // matching the registry's own miss variant, not `InvalidData`.
+        Err(oxideav_core::Error::Unsupported(format!(
             "no bundled in-process driver for scheme {scheme:?} (URI: {uri_str}); \
              only file/mem/data/slice/concat are dispatchable without a registry"
         )))

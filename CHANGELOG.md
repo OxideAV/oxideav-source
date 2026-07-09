@@ -47,6 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors. New helper `uri::scheme_is` (crate-internal surface) keeps
   the driver-level re-check aligned with registry dispatch.
 
+### Changed
+
+- Error taxonomy aligned with the core `Error` contract (was:
+  everything `InvalidData`). A well-formed `mem://` URI whose buffer
+  isn't registered now returns `Io(NotFound)` — the same shape as a
+  missing file; `open_bytes` on a scheme it has no driver for returns
+  `Unsupported`, matching the registry's own miss variant;
+  `FileScope` policy rejections (allow-list miss, deny-list hit)
+  return `Io(PermissionDenied)`, and a canonicalisation failure keeps
+  the underlying IO kind. Malformed URIs (bad grammar, escapes,
+  base64, out-of-bounds slice windows) stay `InvalidData`. Composite
+  drivers propagate the inner taxonomy unchanged
+  (`tests/error_taxonomy.rs` pins all of this).
+
 ### Added
 
 - `ConcatUri` — public typed view of a parsed `concat:` URI,

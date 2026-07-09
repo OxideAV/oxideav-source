@@ -139,18 +139,33 @@ impl FileScope {
         }
         // Canonicalise — this follows symlinks and resolves `..`, which
         // is exactly what defeats a `/safe/../etc/passwd` traversal.
-        let canon = std::fs::canonicalize(&decoded)
-            .map_err(|e| Error::invalid(format!("file '{decoded}' did not canonicalise: {e}")))?;
+        // Taxonomy: canonicalisation failure is a filesystem miss (the
+        // path typically does not exist) — keep the underlying IO kind
+        // rather than reporting malformed input.
+        let canon = std::fs::canonicalize(&decoded).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("file '{decoded}' did not canonicalise: {e}"),
+            ))
+        })?;
+        // Taxonomy: policy rejections are PermissionDenied — the path
+        // is well-formed and may even exist; this scope refuses it.
         if self.is_denied(&canon) {
-            return Err(Error::invalid(format!(
-                "file '{decoded}' (canonical '{}') is inside a FileScope deny-listed root",
-                canon.display()
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "file '{decoded}' (canonical '{}') is inside a FileScope deny-listed root",
+                    canon.display()
+                ),
             )));
         }
         if !self.is_allow_listed(&canon) {
-            return Err(Error::invalid(format!(
-                "file '{decoded}' (canonical '{}') is outside the FileScope allow-list",
-                canon.display()
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "file '{decoded}' (canonical '{}') is outside the FileScope allow-list",
+                    canon.display()
+                ),
             )));
         }
         Ok(canon)
