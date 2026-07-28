@@ -27,7 +27,7 @@ use std::io::Read;
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_source::{
-    open_data, parse_concat_uri, parse_data_uri, parse_slice_uri, ConcatUri, SliceUri,
+    open_data, parse_concat_uri, parse_data_uri, parse_slice_uri, ConcatUri, DataUri, SliceUri,
 };
 
 fn check_slice(s: &str) {
@@ -82,6 +82,17 @@ fn check_data(s: &str) {
         !parsed.mediatype.contains(','),
         "data: mediatype must stop at the comma"
     );
+    // Value fixpoint: the payload is stored decoded, so byte-identity
+    // with the input is out of scope, but re-parsing the canonical
+    // formatted form must reproduce the same typed value.
+    let formatted = parsed.format();
+    let again = parse_data_uri(&formatted).expect("data: format must re-parse");
+    assert_eq!(again, parsed, "data: parse-format-parse fixpoint");
+    // Constructor agreement: the parser only emits component sets the
+    // constructor's round-trip preconditions admit.
+    let rebuilt = DataUri::new(parsed.mediatype.clone(), parsed.base64, parsed.data.clone())
+        .expect("parser-accepted components must satisfy DataUri::new");
+    assert_eq!(rebuilt, parsed, "data: constructor agreement");
     // open_data must serve exactly the bytes parse decoded.
     let mut r = open_data(s).expect("data: parse ok implies open ok");
     let mut served = Vec::new();
