@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slashes are unaffected: `concat:///a|b` is the authority-style
   spelling of first segment `/a` and still normalises; segments after
   the first may carry any number of leading slashes.
+- `FileScope` roots configured **before their directory exists** are
+  now re-canonicalised at check time instead of being compared
+  verbatim. Insertion-time canonicalisation fails on a not-yet-created
+  directory and the raw spelling was kept — but request paths are
+  always compared in canonical form, so on hosts where the configured
+  path crosses a symlink (macOS `/var` → `/private/var`) such a root
+  never matched. For an allow root that was merely surprising
+  (rejects everything); for a **deny root it silently failed open** —
+  `allow_dir(root).deny_dir(root.join("private"))` configured before
+  the private subtree was created did not deny it once created.
+  Successfully-canonicalised roots are pinned at insertion exactly as
+  before; only entries whose insertion-time canonicalisation failed
+  re-attempt it per check.
 - `BufferedSource` reader/worker **deadlock on a completely full
   ring** (fuzz-found): an in-window seek to the ring end performs no
   ring maintenance, so with the ring at capacity the worker was parked

@@ -24,9 +24,14 @@
 //!
 //! A scope-bound opener resolves the requested path through
 //! `std::fs::canonicalize` (which follows symlinks and resolves `..`)
-//! and consults both lists against that canonical form. Install a scope
-//! with [`FileScope::register_into`]; from then on,
-//! `reg.open("file://…")` is filtered through the scope.
+//! and consults both lists against that canonical form. List entries
+//! are themselves canonicalised at insertion time; an entry whose
+//! directory does not exist yet keeps its spelling and is
+//! re-canonicalised at each check, so a scope configured before its
+//! directories are created still engages correctly on hosts where the
+//! parent path involves symlinks. Install a scope with
+//! [`FileScope::register_into`]; from then on, `reg.open("file://…")`
+//! is filtered through the scope.
 //!
 //! `register_into` plumbs the active scope through a process-global
 //! slot because the registry's opener API takes a plain `fn` pointer.
@@ -44,19 +49,67 @@ use oxideav_core::{BytesSource, Error, Result, SourceRegistry};
 
 use crate::uri;
 
+/// One allow- or deny-list root.
+///
+/// Roots are canonicalised at insertion time when possible. A root
+/// whose directory did not exist yet (canonicalisation failed) is kept
+/// verbatim and re-canonicalised **at check time**: request paths are
+/// always compared in canonical form, so a verbatim root that itself
+/// contains a symlinked component (`/var/...` on hosts where `/var` is
+/// a symlink) would otherwise never match — which is merely surprising
+/// for an allow root, but silently fails *open* for a deny root that
+/// was configured before its subtree was created.
+#[derive(Clone, Debug)]
+struct Root {
+    path: PathBuf,
+    /// True iff `path` is the result of a successful canonicalisation
+    /// at insertion time; such roots are compared as-is. False means
+    /// the insertion-time canonicalisation failed (directory did not
+    /// exist yet) and each check re-attempts it.
+    pinned: bool,
+}
+
+impl Root {
+    fn new<P: AsRef<Path>>(dir: P) -> Self {
+        match std::fs::canonicalize(dir.as_ref()) {
+            Ok(canon) => Self {
+                path: canon,
+                pinned: true,
+            },
+            Err(_) => Self {
+                path: dir.as_ref().into(),
+                pinned: false,
+            },
+        }
+    }
+
+    /// True iff `canon` (a canonical request path) lies at or under
+    /// this root, compared component-wise.
+    fn covers(&self, canon: &Path) -> bool {
+        if self.pinned {
+            return under_root(&self.path, canon);
+        }
+        // Deferred canonicalisation: the directory may exist by now.
+        // Fall back to the verbatim spelling when it still doesn't.
+        match std::fs::canonicalize(&self.path) {
+            Ok(c) => under_root(&c, canon),
+            Err(_) => under_root(&self.path, canon),
+        }
+    }
+}
+
 /// Configurable allow/deny policy for `file://` opens.
 #[derive(Clone, Debug, Default)]
 pub struct FileScope {
-    /// Canonicalised allow-list roots. A request is eligible iff its
-    /// canonical form lies under one of these roots (path-component
-    /// prefix match, not byte-prefix). Empty + non-permissive = reject
-    /// everything.
-    roots: Vec<PathBuf>,
-    /// Canonicalised deny-list roots. A request is rejected whenever
-    /// its canonical form lies under one of these roots, even when the
-    /// allow-list (or `permissive`) would otherwise admit it. Same
+    /// Allow-list roots. A request is eligible iff its canonical form
+    /// lies under one of these roots (path-component prefix match, not
+    /// byte-prefix). Empty + non-permissive = reject everything.
+    roots: Vec<Root>,
+    /// Deny-list roots. A request is rejected whenever its canonical
+    /// form lies under one of these roots, even when the allow-list
+    /// (or `permissive`) would otherwise admit it. Same
     /// component-aware prefix match as `roots`.
-    denies: Vec<PathBuf>,
+    denies: Vec<Root>,
     /// If true, the `roots` list is bypassed: any canonicalisable path
     /// is admitted unless the deny-list rejects it. Used by
     /// [`permissive`](Self::permissive) to represent "no restriction
@@ -88,11 +141,15 @@ impl FileScope {
 
     /// Permit any path whose canonical form lives under `dir`.
     /// The directory itself is canonicalised at insertion time, so
-    /// downstream resolution does not chase symlinks repeatedly.
+    /// downstream resolution does not chase symlinks repeatedly. If
+    /// the directory does not exist yet, the spelling is kept and
+    /// canonicalisation is re-attempted at each check, so configuring
+    /// a scope before creating its directories still works on hosts
+    /// where the parent path involves symlinks.
     pub fn allow_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
-        let canon = std::fs::canonicalize(dir.as_ref()).unwrap_or_else(|_| dir.as_ref().into());
-        if !self.roots.iter().any(|r| r == &canon) {
-            self.roots.push(canon);
+        let root = Root::new(dir);
+        if !self.roots.iter().any(|r| r.path == root.path) {
+            self.roots.push(root);
         }
         self
     }
@@ -107,10 +164,17 @@ impl FileScope {
     /// Deny entries take precedence: if a path is under both an allow
     /// root and a deny root, the deny wins. Component-aware prefix
     /// match — `deny_dir("/foo")` does not affect `/foobar`.
+    ///
+    /// A deny root whose directory does not exist yet keeps its
+    /// spelling and is re-canonicalised at each check (see
+    /// [`allow_dir`](Self::allow_dir)) — so a carve-out configured
+    /// before the private subtree is created still engages once it
+    /// exists, even when the configured spelling and the canonical
+    /// form differ through a symlinked parent.
     pub fn deny_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
-        let canon = std::fs::canonicalize(dir.as_ref()).unwrap_or_else(|_| dir.as_ref().into());
-        if !self.denies.iter().any(|r| r == &canon) {
-            self.denies.push(canon);
+        let root = Root::new(dir);
+        if !self.denies.iter().any(|r| r.path == root.path) {
+            self.denies.push(root);
         }
         self
     }
@@ -179,16 +243,12 @@ impl FileScope {
         if self.permissive {
             return true;
         }
-        self.roots
-            .iter()
-            .any(|root| under_root(root.as_path(), canon))
+        self.roots.iter().any(|root| root.covers(canon))
     }
 
     /// True iff `canon` lies under at least one deny-listed root.
     fn is_denied(&self, canon: &Path) -> bool {
-        self.denies
-            .iter()
-            .any(|root| under_root(root.as_path(), canon))
+        self.denies.iter().any(|root| root.covers(canon))
     }
 
     /// Combined verdict: returns true iff this scope would admit
@@ -449,6 +509,47 @@ mod tests {
             .deny_dir(&hole)
             .deny_dir(&hole);
         assert_eq!(scope.denies.len(), 1);
+    }
+
+    #[test]
+    fn allow_dir_configured_before_creation_engages_later() {
+        // Configure the scope BEFORE the allow root exists (the
+        // insertion-time canonicalisation cannot succeed), then create
+        // it. On hosts where the temp root sits behind a symlink the
+        // stored spelling and the canonical request path differ; the
+        // deferred re-canonicalisation must reconcile them.
+        let dir = std::env::temp_dir().join("oxideav-scope-precreate-allow");
+        let _ = std::fs::remove_dir_all(&dir);
+        let scope = FileScope::new().allow_dir(&dir); // does not exist yet
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let canon = scope
+            .resolve(&format!("file://{}", file.display()))
+            .expect("allow root created after configuration must engage");
+        assert_eq!(canon, std::fs::canonicalize(&file).unwrap());
+    }
+
+    #[test]
+    fn deny_dir_configured_before_creation_still_denies() {
+        // Security-relevant: a deny root inserted before its directory
+        // existed used to be stored verbatim and compared against the
+        // CANONICAL request path — on hosts where the temp root sits
+        // behind a symlink (`/var` → `/private/var`) it never matched,
+        // and the carve-out silently failed OPEN. The deferred
+        // re-canonicalisation must close that hole.
+        let root = tmp_dir("precreate-deny-root");
+        let hole = root.join("private");
+        let _ = std::fs::remove_dir_all(&hole);
+        let scope = FileScope::new().allow_dir(&root).deny_dir(&hole); // hole absent
+        std::fs::create_dir_all(&hole).unwrap();
+        let secret = hole.join("secret.bin");
+        std::fs::write(&secret, b"s").unwrap();
+        let r = scope.resolve(&format!("file://{}", secret.display()));
+        assert!(
+            r.is_err(),
+            "deny root configured before its creation must still engage"
+        );
     }
 
     #[test]
