@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slashes are unaffected: `concat:///a|b` is the authority-style
   spelling of first segment `/a` and still normalises; segments after
   the first may carry any number of leading slashes.
+- `BufferedSource` reader/worker **deadlock on a completely full
+  ring** (fuzz-found): an in-window seek to the ring end performs no
+  ring maintenance, so with the ring at capacity the worker was parked
+  on `not_full`, the subsequent read missed the ring and parked on
+  `not_empty`, and neither side could ever progress — surfacing after
+  `prefetch_timeout` (default 30 s) as a bogus `TimedOut` on a
+  perfectly healthy source. Two changes in the read-miss path: a known
+  total length now yields an immediate EOF verdict (the worker may
+  never get to read the final 0 that sets its `eof` flag while parked
+  on a full ring), and a full ring that sits entirely behind the
+  reader is drained down to the lookback allowance (the same retention
+  rule the hit path applies) so the worker wakes and refills toward
+  the reader's position.
 
 - `BufferedSource` worker errors are now **sticky** and ordered after
   ring data. Previously the error was `take`n and surfaced exactly

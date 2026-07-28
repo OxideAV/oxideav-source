@@ -93,6 +93,18 @@ impl RingState {
             .as_ref()
             .map(|(kind, msg)| io::Error::new(*kind, msg.clone()))
     }
+
+    /// Lookback allowance in bytes: how much the ring retains behind
+    /// the reader so short back-seeks hit without re-fetching.
+    /// `lookback_den` is sanitised non-zero on build; the sanitised
+    /// fraction is strictly below 1, so this is strictly below
+    /// `capacity`. Integer math; no floats.
+    fn rear(&self) -> usize {
+        (self.capacity as u64)
+            .saturating_mul(self.lookback_num as u64)
+            .checked_div(self.lookback_den as u64)
+            .unwrap_or(0) as usize
+    }
 }
 
 struct Shared {
@@ -426,12 +438,8 @@ impl Read for BufferedSource {
                 // But keep some slack so backward seeks within recent past
                 // still hit. Use the builder-configured lookback fraction
                 // (default 1/8 of capacity) as the "rear" the reader can
-                // lookback into without re-fetching. Integer math; no
-                // floats. `lookback_den` is sanitised non-zero on build.
-                let rear = (st.capacity as u64)
-                    .saturating_mul(st.lookback_num as u64)
-                    .checked_div(st.lookback_den as u64)
-                    .unwrap_or(0) as usize;
+                // lookback into without re-fetching.
+                let rear = st.rear();
                 if drop_n > rear {
                     let to_drop = drop_n - rear;
                     st.buf.drain(..to_drop);
@@ -452,6 +460,30 @@ impl Read for BufferedSource {
             }
             if st.eof {
                 return Ok(0);
+            }
+            // The worker only learns EOF by reading a final 0 from the
+            // inner source, which it may never get to do (e.g. it is
+            // parked on a full ring). A known total length makes the
+            // verdict immediate: reads at or past it are EOF.
+            if matches!(st.total_len, Some(total) if self.pos >= total) {
+                return Ok(0);
+            }
+            // A full ring that sits entirely behind the reader can never
+            // satisfy this read: the worker is parked on `not_full` and
+            // the reader is about to park on `not_empty` — a deadlock
+            // that would eventually surface as a bogus `TimedOut`. This
+            // state is reachable by seeking to the ring end (an
+            // in-window seek performs no ring maintenance). Make room by
+            // draining everything beyond the lookback allowance — the
+            // same retention rule the hit path applies — and wake the
+            // worker. The sanitised lookback fraction is strictly below
+            // 1, so at least one byte is always freed.
+            if st.buf.len() == st.capacity {
+                let to_drop = st.buf.len() - st.rear();
+                st.buf.drain(..to_drop);
+                st.ring_start += to_drop as u64;
+                self.shared.not_full.notify_one();
+                continue; // ring is no longer full; fall through to the wait
             }
             // Wait for worker to push more bytes — bounded so a stuck
             // worker becomes visible rather than deadlocking forever.

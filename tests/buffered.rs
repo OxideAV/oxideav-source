@@ -75,6 +75,121 @@ fn seek_to_end_then_read_returns_zero() {
     assert!(t0.elapsed() < Duration::from_secs(2));
 }
 
+/// `Read + Seek` wrapper that counts the bytes its reads have served,
+/// so a test can wait until the prefetch worker has consumed a known
+/// amount of the inner source before poking at the ring.
+struct CountingInner {
+    inner: Cursor<Vec<u8>>,
+    served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Read for CountingInner {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.served
+            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl Seek for CountingInner {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(from)
+    }
+}
+
+/// Spin until the worker has pulled at least `want` bytes from the
+/// inner source, then a beat longer so the final block lands in the
+/// ring. Panics rather than spinning forever if the worker stalls.
+fn wait_served(served: &std::sync::atomic::AtomicUsize, want: usize) {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    while served.load(std::sync::atomic::Ordering::SeqCst) < want {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "prefetch worker never served {want} bytes"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The counter ticks when the inner `read` returns; the deposit into
+    // the ring happens moments later under the lock. Give it a beat.
+    std::thread::sleep(Duration::from_millis(50));
+}
+
+#[test]
+fn seek_to_end_of_full_ring_at_eof_returns_zero() {
+    // Fuzz-found (buffered_model target): with `capacity == payload
+    // length`, the worker fills the ring completely and parks on
+    // `not_full` WITHOUT ever reading the final 0 that would set `eof`.
+    // A seek to the stream end stays inside the ring window (position
+    // == ring end), so the subsequent read used to miss the ring, see
+    // `eof == false`, and park on `not_empty` — deadlock, surfacing as
+    // a bogus 30 s `TimedOut`. The known total length must yield an
+    // immediate EOF verdict instead.
+    use std::time::{Duration, Instant};
+    let n = 16 * 1024; // == clamped minimum capacity (4 × 4 KiB blocks)
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let inner = CountingInner {
+        inner: Cursor::new(ramp(n)),
+        served: std::sync::Arc::clone(&served),
+    };
+    let mut buf = BufferedSource::builder()
+        .capacity(n)
+        .block_size(4 * 1024)
+        .prefetch_timeout(std::time::Duration::from_secs(30))
+        .build(Box::new(inner))
+        .unwrap();
+    wait_served(&served, n); // ring now holds the whole payload
+    let end = buf.seek(SeekFrom::Start(n as u64)).unwrap();
+    assert_eq!(end, n as u64);
+    let t0 = Instant::now();
+    let mut out = [0u8; 8];
+    assert_eq!(buf.read(&mut out).unwrap(), 0, "read at EOF");
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "EOF read must not wait on the parked worker"
+    );
+}
+
+#[test]
+fn seek_to_end_of_full_ring_mid_stream_drains_and_resumes() {
+    // Same parked-worker shape, but the ring end is NOT the stream end:
+    // the read cannot be satisfied from the ring (everything in it is
+    // behind the reader) and the worker cannot refill (ring full). The
+    // reader must make room — drain beyond the lookback allowance —
+    // and then receive fresh bytes, not a `TimedOut`.
+    use std::time::{Duration, Instant};
+    let cap = 16 * 1024;
+    let total = 48 * 1024;
+    let data = ramp(total);
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let inner = CountingInner {
+        inner: Cursor::new(data.clone()),
+        served: std::sync::Arc::clone(&served),
+    };
+    let mut buf = BufferedSource::builder()
+        .capacity(cap)
+        .block_size(4 * 1024)
+        .prefetch_timeout(std::time::Duration::from_secs(30))
+        .build(Box::new(inner))
+        .unwrap();
+    wait_served(&served, cap); // ring full over [0, cap), worker parked
+    let pos = buf.seek(SeekFrom::Start(cap as u64)).unwrap();
+    assert_eq!(pos, cap as u64);
+    let t0 = Instant::now();
+    let mut out = vec![0u8; 4096];
+    buf.read_exact(&mut out).unwrap();
+    assert_eq!(out[..], data[cap..cap + 4096], "resumed bytes");
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "mid-stream read past a full ring must drain and resume promptly"
+    );
+    // And the rest of the stream still arrives intact.
+    let mut rest = Vec::new();
+    buf.read_to_end(&mut rest).unwrap();
+    assert_eq!(rest[..], data[cap + 4096..]);
+}
+
 #[test]
 fn drop_terminates_worker_promptly() {
     use std::time::{Duration, Instant};
