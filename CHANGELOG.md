@@ -89,6 +89,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DataUri::new` / `DataUri::format` / `DataUri::open` (+ `Display`) —
+  the `data:` scheme joins the typed-URI triad convention already
+  established by `SliceUri` and `ConcatUri`. `new` rejects only what
+  breaks the `parse(format(x)) == x` fixpoint: a mediatype containing
+  `,` (header/payload split), a non-base64 mediatype ending in
+  `;base64` (marker ambiguity — the flag would flip on re-parse), or a
+  mediatype starting with `//` (authority-spelling ambiguity, same
+  rule as the new `concat:` first-segment guard; `parse` rejects the
+  corresponding 4-slash `data:////x,…` URIs too). `format` emits
+  canonical spellings — RFC 4648 §4 base64 (padded, no line breaks)
+  or uppercase-hex percent-encoding of every byte outside the RFC
+  3986 unreserved set. Because the payload is stored decoded, the
+  round-trip contract is the value fixpoint, not byte-identity with
+  the originally parsed URI (which may have used different escaping
+  choices) — documented on the type.
 - `fuzz/` — libFuzzer harness (cargo-fuzz layout) with three targets:
   `uri_parse` (the grammar layer on raw attacker bytes: no panic,
   `parse(format(x)) == x` fixpoint, canonical byte-identical
