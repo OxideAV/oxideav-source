@@ -265,6 +265,18 @@ impl ConcatUri {
                 )));
             }
         }
+        if segments[0].starts_with("//") {
+            // `format` would emit `concat://<...>`, whose leading `//` the
+            // scheme splitter consumes as the authority-style spelling —
+            // every parse of the formatted form would eat two more
+            // slashes, so the value cannot round-trip.
+            return Err(Error::invalid(format!(
+                "concat: first segment {:?} starts with \"//\"; it cannot round-trip \
+                 because the formatted URI's leading '//' reads as the authority-style \
+                 `concat://` spelling",
+                segments[0]
+            )));
+        }
         Ok(Self { segments })
     }
 
@@ -314,6 +326,20 @@ pub fn parse(uri_str: &str) -> Result<ConcatUri> {
         return Err(Error::invalid("concat: URI requires at least one segment"));
     }
     let segs = segments(rest)?;
+    if segs[0].starts_with("//") {
+        // The scheme splitter has already consumed one authority-style
+        // `//`; a first segment STILL starting with `//` means the URI
+        // carried four-plus leading slashes (`concat:////x|…`). Such a
+        // value cannot round-trip — each `format` → `parse` cycle would
+        // strip two more slashes — so reject it up front instead of
+        // silently mutating the segment on every pass.
+        return Err(Error::invalid(format!(
+            "concat: first segment {:?} starts with \"//\" after the scheme split; \
+             a first segment with leading '//' is ambiguous with the authority-style \
+             `concat://` spelling and cannot round-trip",
+            segs[0]
+        )));
+    }
     Ok(ConcatUri {
         segments: segs.into_iter().map(str::to_string).collect(),
     })
@@ -663,6 +689,36 @@ mod tests {
         let c = ConcatUri::new(["http://example.com/x"]).unwrap();
         // ...and open rejects it.
         assert!(c.open().is_err());
+    }
+
+    #[test]
+    fn leading_double_slash_first_segment_rejected() {
+        // Fuzz-found (uri_parse target): `concat:////a|b` survives the
+        // scheme splitter's single `//` strip with a first segment of
+        // `//a`, which `format` re-emits as `concat://a|b` — and the
+        // NEXT parse strips two more slashes. The fixpoint
+        // `parse(format(x)) == x` demands rejection of the ambiguous
+        // form in both the parser and the constructor.
+        let msg = match parse("concat:////a|b") {
+            Err(e) => e,
+            Ok(v) => panic!("4-slash first segment must be rejected, got {v:?}"),
+        };
+        assert!(
+            msg.to_string().contains("round-trip"),
+            "expected round-trip rationale, got {msg}"
+        );
+        assert!(ConcatUri::new(["//a", "b"]).is_err());
+        // One or two leading slashes stay fine: `concat:///a|b` is the
+        // authority-style spelling of first segment `/a`.
+        let c = parse("concat:///a|b").unwrap();
+        assert_eq!(c.segments, ["/a", "b"]);
+        assert_eq!(c.format(), "concat:/a|b");
+        let again = parse(&c.format()).unwrap();
+        assert_eq!(again, c);
+        // Non-first segments may carry leading slashes freely.
+        let c = parse("concat:a|//b").unwrap();
+        assert_eq!(c.segments, ["a", "//b"]);
+        assert_eq!(parse(&c.format()).unwrap(), c);
     }
 
     #[test]

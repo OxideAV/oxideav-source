@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `concat:` URIs whose **first segment starts with `//`** are now
+  rejected (fuzz-found). `concat:////a|b` survived the scheme
+  splitter's single authority-style `//` strip with a first segment of
+  `//a` — which `format()` re-emits as `concat://a|b`, and the next
+  parse strips two MORE slashes, so every `parse` → `format` → `parse`
+  cycle silently ate two leading slashes and the documented fixpoint
+  `parse(format(x)) == x` was violated. Both `parse_concat_uri` and
+  `ConcatUri::new` now reject the ambiguous form with a precise error
+  (mirroring the existing `|`-in-segment rule). One or two leading
+  slashes are unaffected: `concat:///a|b` is the authority-style
+  spelling of first segment `/a` and still normalises; segments after
+  the first may carry any number of leading slashes.
+
 - `BufferedSource` worker errors are now **sticky** and ordered after
   ring data. Previously the error was `take`n and surfaced exactly
   once; every subsequent read missed the ring, slept on the prefetch
