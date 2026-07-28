@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/OxideAV/oxideav-source/compare/v0.1.5...v0.1.6) - 2026-07-28
+
+### Other
+
+- r433 surface refresh — symlink contract, fuzz harness, DataUri triad
+- re-canonicalise not-yet-existing roots at check time
+- uri_parse checks the DataUri value fixpoint + constructor agreement
+- typed DataUri::new / format / open — triad completion
+- libFuzzer harness — uri_parse / compose_open / buffered_model
+- fix reader/worker deadlock on a completely full ring
+- reject ambiguous leading-// first segment (round-trip fix)
+- symlink-escape hardening suite for FileScope
+- align driver taxonomy with the core Error contract
+- round-399 surface refresh
+- sticky worker errors, ring-first ordering, Interrupted retry
+- typed ConcatUri — parse / format / open triad completion
+- scope the round-trip invariant to canonical spellings
+- criterion read-path suite + BENCHMARKS.md
+- model-differential + hostile-input hardening sweeps
+- allow deliberate SeekFrom::Current(0) in conformance battery
+- shared Read+Seek conformance battery across 17 source shapes
+- shared registry-free dispatch; slice: accepts concat: inner
+- enforce canonical decimal grammar for offset/length
+- scheme matching is case-insensitive per RFC 3986 §3.1
+- add CI / crates.io / docs.rs / MIT-license badges
+- typed SliceUri::open — open straight from the parsed/built value
+- expose typed SliceUri + parse_slice_uri (parallel to DataUri)
+- drop release-plz.toml — use release-plz defaults across the workspace
+- percent-decode file:// URI paths per RFC 3986 §2.1
+- deny_dir carve-outs over allow-list
+
 ### Fixed
 
 - `concat:` URIs whose **first segment starts with `//`** are now
