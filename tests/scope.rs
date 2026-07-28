@@ -147,3 +147,229 @@ fn scoped_registry_deny_traversal_into_hole_is_blocked() {
         "traversal into deny-listed subtree must be rejected"
     );
 }
+
+// ───────────────────── symlink escape attempts (Unix) ─────────────────────
+//
+// The module docs promise "blocks `..` traversals through symlinks":
+// every requested path is resolved through `std::fs::canonicalize`
+// before consulting the allow/deny lists, so the verdict is always on
+// the PHYSICAL location of the target — a symlink can neither smuggle
+// an outside file into an allow root nor alias a denied subtree under
+// an innocent-looking name. These tests pin that contract with real
+// symlinks (Unix-only: `std::os::unix::fs::symlink`).
+#[cfg(unix)]
+mod symlink_escapes {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// Fresh pair of sibling directories `<tag>-root` (the allow root)
+    /// and `<tag>-outside` (physically outside it), both cleaned first
+    /// so reruns don't trip over stale links.
+    fn root_and_outside(tag: &str) -> (PathBuf, PathBuf) {
+        let root = tmpdir(&format!("{tag}-root"));
+        let outside = tmpdir(&format!("{tag}-outside"));
+        for d in [&root, &outside] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        (root, outside)
+    }
+
+    #[test]
+    fn symlink_to_outside_file_is_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("sym-file-out");
+        let secret = outside.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+        // Innocent-looking name inside the allow root, physically outside.
+        let link = root.join("movie.mp4");
+        symlink(&secret, &link).unwrap();
+
+        let scope = FileScope::new().allow_dir(&root);
+        let r = scope.resolve(&format!("file://{}", link.display()));
+        assert!(
+            r.is_err(),
+            "symlink inside allow root pointing outside must be rejected"
+        );
+    }
+
+    #[test]
+    fn symlink_to_inside_file_is_admitted() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, _outside) = root_and_outside("sym-file-in");
+        let real = root.join("real.bin");
+        std::fs::write(&real, b"payload").unwrap();
+        let link = root.join("alias.bin");
+        symlink(&real, &link).unwrap();
+
+        let scope = FileScope::new().allow_dir(&root);
+        let canon = scope
+            .resolve(&format!("file://{}", link.display()))
+            .expect("symlink to a file physically inside the root must resolve");
+        assert_eq!(canon, std::fs::canonicalize(&real).unwrap());
+    }
+
+    #[test]
+    fn path_through_symlinked_dir_to_outside_is_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("sym-dir-out");
+        let secret = outside.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+        // root/media -> outside; request root/media/secret.bin.
+        let dir_link = root.join("media");
+        symlink(&outside, &dir_link).unwrap();
+
+        let scope = FileScope::new().allow_dir(&root);
+        let r = scope.resolve(&format!("file://{}/secret.bin", dir_link.display()));
+        assert!(
+            r.is_err(),
+            "path descending through a symlinked dir out of the root must be rejected"
+        );
+    }
+
+    #[test]
+    fn dotdot_through_symlinked_dir_escapes_are_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("sym-dotdot");
+        // The bait sits NEXT TO the link target: outside/deep/../bait.bin.
+        let deep = outside.join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        let bait = outside.join("bait.bin");
+        std::fs::write(&bait, b"bait").unwrap();
+        let dir_link = root.join("deep-link");
+        symlink(&deep, &dir_link).unwrap();
+
+        // Textually `root/deep-link/../bait.bin` looks like it stays
+        // under `root` (`root/bait.bin`); physically the `..` applies to
+        // the RESOLVED link target, yielding `outside/bait.bin`.
+        // Canonicalise-first semantics must follow the physical route
+        // and reject.
+        let traversal = dir_link.join("..").join("bait.bin");
+        let scope = FileScope::new().allow_dir(&root);
+        let r = scope.resolve(&format!("file://{}", traversal.display()));
+        assert!(
+            r.is_err(),
+            "`..` applied after symlink resolution escapes the root and must be rejected"
+        );
+    }
+
+    #[test]
+    fn symlink_alias_into_deny_subtree_is_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, _outside) = root_and_outside("sym-deny-alias");
+        let hole = root.join("private");
+        std::fs::create_dir_all(&hole).unwrap();
+        let secret = hole.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+        // Innocent-looking alias inside the allowed area, physically in
+        // the denied subtree.
+        let link = root.join("public-looking.bin");
+        symlink(&secret, &link).unwrap();
+
+        let scope = FileScope::new().allow_dir(&root).deny_dir(&hole);
+        let r = scope.resolve(&format!("file://{}", link.display()));
+        assert!(
+            r.is_err(),
+            "symlink aliasing a deny-listed file must be rejected on its physical location"
+        );
+    }
+
+    #[test]
+    fn symlink_inside_deny_subtree_to_public_file_is_admitted() {
+        // Deny verdicts are on the PHYSICAL location too: a link that
+        // merely LIVES inside the denied subtree but points at a public
+        // file resolves to the public file's canonical path, which the
+        // deny list does not cover. Pinned as documented behaviour —
+        // the deny list protects the denied bytes, not the namespace.
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, _outside) = root_and_outside("sym-deny-inside");
+        let hole = root.join("private");
+        std::fs::create_dir_all(&hole).unwrap();
+        let public = root.join("public.bin");
+        std::fs::write(&public, b"public").unwrap();
+        let link = hole.join("escape.bin");
+        symlink(&public, &link).unwrap();
+
+        let scope = FileScope::new().allow_dir(&root).deny_dir(&hole);
+        let canon = scope
+            .resolve(&format!("file://{}", link.display()))
+            .expect("link under deny subtree to a public file resolves to the public path");
+        assert_eq!(canon, std::fs::canonicalize(&public).unwrap());
+    }
+
+    #[test]
+    fn percent_encoded_dotdot_traversal_is_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("enc-dotdot");
+        let secret = outside.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        // file://<root>/%2e%2e/<outside-name>/secret.bin — the escapes
+        // decode to `..` (RFC 3986 §2.1) BEFORE canonicalisation, so the
+        // scope sees the same traversal as a literal `..` and rejects it.
+        let outside_name = outside.file_name().unwrap().to_string_lossy();
+        let uri = format!(
+            "file://{}/%2e%2e/{}/secret.bin",
+            root.display(),
+            outside_name
+        );
+        let scope = FileScope::new().allow_dir(&root);
+        let r = scope.resolve(&uri);
+        assert!(
+            r.is_err(),
+            "percent-encoded `..` must decode, canonicalise, and be rejected"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_slash_traversal_is_rejected() {
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("enc-slash");
+        let secret = outside.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        // Separators smuggled entirely through %2F escapes: the decoded
+        // path is a plain `<root>/../<outside>/secret.bin` traversal.
+        let outside_name = outside.file_name().unwrap().to_string_lossy();
+        let uri = format!(
+            "file://{}%2F..%2F{}%2Fsecret.bin",
+            root.display(),
+            outside_name
+        );
+        let scope = FileScope::new().allow_dir(&root);
+        let r = scope.resolve(&uri);
+        assert!(
+            r.is_err(),
+            "%2F-smuggled separators must not bypass the allow-list"
+        );
+    }
+
+    #[test]
+    fn scoped_registry_end_to_end_symlink_escape_rejected() {
+        // Same as `symlink_to_outside_file_is_rejected` but through the
+        // full registry pipeline (`register_into` + `reg.open`), so the
+        // process-global slot path is covered too.
+        let _guard = SCOPE_LOCK.lock().unwrap();
+        let (root, outside) = root_and_outside("sym-registry-e2e");
+        let secret = outside.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+        let link = root.join("innocent.bin");
+        symlink(&secret, &link).unwrap();
+
+        let mut reg = SourceRegistry::new();
+        FileScope::new().allow_dir(&root).register_into(&mut reg);
+        let r = reg.open(&format!("file://{}", link.display()));
+        assert!(
+            r.is_err(),
+            "registry-installed scope must reject the symlink escape"
+        );
+
+        // And a legitimate file still opens through the same scope.
+        let ok_file = root.join("ok.bin");
+        std::fs::write(&ok_file, b"ok-bytes").unwrap();
+        let mut r = open_bytes(&reg, &format!("file://{}", ok_file.display()));
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"ok-bytes");
+    }
+}

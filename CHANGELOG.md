@@ -63,6 +63,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FileScope` symlink-escape hardening suite
+  (`tests/scope.rs::symlink_escapes`, Unix): pins the
+  canonicalise-first contract with real symlinks — a link inside the
+  allow root pointing at an outside file (or a whole symlinked
+  directory) is rejected on its physical target; `..` applied *after*
+  symlink resolution (`root/link/../bait`) follows the physical route
+  out of the root and is rejected; a symlink aliasing a deny-listed
+  file under an innocent name is rejected; a link that lives inside a
+  denied subtree but points at a public file is admitted (deny
+  verdicts are on the physical bytes, not the namespace — pinned as
+  documented behaviour); percent-encoded traversals (`%2e%2e`,
+  `%2F`-smuggled separators) decode per RFC 3986 §2.1 before
+  canonicalisation and are rejected; plus an end-to-end
+  registry-pipeline (`register_into` + `reg.open`) escape check.
 - `ConcatUri` — public typed view of a parsed `concat:` URI,
   completing the typed-URI triad next to `DataUri` and `SliceUri`.
   `parse_concat_uri(uri)` returns
