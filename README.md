@@ -17,7 +17,7 @@ slot into the same opener API.
 | `file://<path>` (scoped) | `FileScope` + `open_file_scoped` | restricts opens to a canonicalised directory allow-list, with optional `deny_dir` carve-outs that override allow-list matches; blocks `..` traversals through symlinks; same RFC 3986 §2.1 percent-decoding for URI-form inputs |
 | `mem://<id>` | `open_mem` | in-memory buffer registered via `oxideav_source::mem::put(id, bytes)`; useful for tests and synthetic sources |
 | `data:[<mediatype>][;base64],<bytes>` | `open_data` | RFC 2397 inline byte literals; payload decoded directly from the URI (no filesystem access). Percent-decoded by default; base64 when `;base64` is present. |
-| `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI. Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected. |
+| `concat:<a>\|<b>\|…` | `open_concat` | `\|`-separated segments presented as one seekable byte stream; reads walk segment boundaries, `Seek` resolves an absolute offset into the right segment. Each segment may be a bare path, `file://`, `mem://`, `data:`, or `slice:` URI. Nested `concat:` segments rejected (the outer `\|` split would shred them); empty segments rejected; a **first** segment starting with `//` rejected (ambiguous with the authority-style `concat://` spelling — it could not round-trip). |
 | `slice:<offset>+<length>!<inner-uri>` | `open_slice` | URI-level windowed view: `[offset, offset + length)` of `<inner-uri>` mapped onto `[0, length)`. The inner URI may be a `file://` / bare path, `mem://`, `data:`, another `slice:` (recursive composition), or a `concat:` (a window over a concatenation — unambiguous because the slice grammar splits on `!`, never on `\|`). `offset`/`length` are canonical decimals (no sign, no leading zeros). Equivalent to constructing a `SubSource` programmatically, but expressible as a single URI string for CLI flags and config files. |
 | `http://`, `https://` | provided by [oxideav-http](https://github.com/OxideAV/oxideav-http) | registered separately by that crate |
 
@@ -63,6 +63,17 @@ Deny entries override allow matches and also override
 "everything except `/etc/**`". The canonicalisation step is shared, so
 a `..` path that resolves into a deny-listed subtree is blocked.
 
+Verdicts are always on the **physical** (canonicalised) location:
+symlinks cannot smuggle an outside file into an allow root, `..` is
+resolved after symlink expansion, percent-encoded traversals
+(`%2e%2e`, `%2F`) are decoded before canonicalisation, and a symlink
+aliasing a deny-listed file under an innocent name is still denied
+(`tests/scope.rs::symlink_escapes` pins all of this). Roots whose
+directory does not exist at configuration time are re-canonicalised at
+check time, so a scope built before its directories are created still
+engages correctly on hosts where the path crosses a symlink
+(macOS `/var` → `/private/var`).
+
 ## BufferedSource
 
 `BufferedSource` wraps any `Box<dyn ReadSeek>` (HTTP, file, mem) with a
@@ -100,7 +111,12 @@ already-prefetched bytes (including lookback-window back-seeks) stay
 readable, and once the ring is exhausted every read re-surfaces the
 original error `(kind, message)` immediately instead of waiting out the
 prefetch timeout. `ErrorKind::Interrupted` from the inner source is
-retried per the std `Read` convention, not treated as fatal.
+retried per the std `Read` convention, not treated as fatal. Reads at
+or past the probed total length report EOF immediately — even while
+the worker is parked on a full ring and never got to observe EOF
+itself — and a full ring sitting entirely behind the reader is drained
+down to the lookback allowance so the worker can refill toward the
+reader (no deadlock, no spurious `TimedOut`).
 
 ## Typed URI values — `DataUri`, `SliceUri`, `ConcatUri`
 
@@ -144,8 +160,19 @@ accepts (equivalent `SLICE:` / `slice://` spellings normalise to the
 canonical form; `parse(format(x)) == x` always). The constructors
 reject only what breaks the grammar round-trip: `SliceUri::new` an
 empty inner or an inner containing a literal `!`; `ConcatUri::new` an
-empty list, an empty segment, or a segment containing `|`. Scheme
-validity stays an open-time concern.
+empty list, an empty segment, a segment containing `|`, or a first
+segment starting with `//` (ambiguous with the authority-style
+spelling). Scheme validity stays an open-time concern.
+
+`DataUri` completes the triad for `data:`:
+`DataUri::new(mediatype, base64, data)` → `format()` / `Display` /
+`open()`. Because the payload is stored **decoded**, its round-trip
+contract is the value fixpoint `parse(format(x)) == x` rather than
+byte-identity — `format` emits canonical spellings (padded RFC 4648
+§4 base64, or uppercase-hex percent-escapes of every byte outside the
+RFC 3986 unreserved set) regardless of how the original URI spelled
+them. `new` rejects a mediatype containing `,`, a non-base64 mediatype
+ending in `;base64`, and a mediatype starting with `//`.
 
 ## SubSource — windowed view
 
@@ -191,7 +218,19 @@ pin the I/O contract:
 - **Hostile input** (`tests/hostile_input.rs`) — separator-biased byte
   soup (NUL, multi-byte UTF-8, RTL override) against the parsers: no
   panics, canonical round-trip, parse-format-parse fixpoint,
-  500-deep nested-slice recursion, truncated percent escapes.
+  500-deep nested-slice recursion, truncated percent escapes. The
+  `symlink_escapes` suite in `tests/scope.rs` covers the `FileScope`
+  attack surface (symlink smuggling, post-symlink `..`, deny-alias,
+  encoded traversals).
+- **Fuzz harness** (`fuzz/`, cargo-fuzz) — three coverage-guided
+  targets: `uri_parse` (grammar fixpoints + constructor/open
+  agreement on raw bytes), `compose_open` (fuzzer-built nested
+  slice/concat/data compositions driven differentially against a
+  `Cursor` model, in-memory only), and `buffered_model` (the prefetch
+  ring under arbitrary tunables and payloads larger than the ring,
+  against the same model). First campaigns surfaced one parser
+  round-trip breakage and one prefetch-ring deadlock — both fixed;
+  post-fix campaigns are clean.
 
 `cargo bench --bench read_paths` measures the hot paths — numbers in
 [BENCHMARKS.md](BENCHMARKS.md) (mem ~59 GiB/s sequential; slice /
