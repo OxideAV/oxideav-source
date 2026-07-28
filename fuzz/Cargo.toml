@@ -1,0 +1,62 @@
+[package]
+name = "oxideav-source-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# oxideav-source is the URI-resolution + byte-source plumbing layer:
+# every pipeline input string flows through its parsers, and the
+# slice:/concat:/data: composition surface is reachable from
+# attacker-controlled URIs (CLI flags, playlists, config files). This
+# fuzz crate hammers three surfaces:
+#
+# * `uri_parse`   — the grammar layer: scheme splitting, RFC 3986 §2.1
+#   percent-decoding, RFC 2397 data: parsing, and the slice:/concat:
+#   typed parsers. No panic on any input; parse -> format -> parse is a
+#   fixpoint; canonical inputs round-trip byte-identically.
+# * `compose_open` — structured composition: builds nested
+#   slice:/concat:/data: URIs from fuzzer bytes, opens them, and drives
+#   the reader with random read/seek ops in lockstep with a computed
+#   `Cursor<Vec<u8>>` model. Bytes, positions, and seek ok-ness must
+#   agree at every step (in-memory only: no filesystem access).
+# * `buffered_model` — the threaded prefetch ring: fuzzer-chosen
+#   capacity/block/lookback tunables plus a random op stream against
+#   the same Cursor model.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-source]
+path = ".."
+
+[lib]
+name = "oxideav_source_fuzz"
+path = "src/lib.rs"
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "uri_parse"
+path = "fuzz_targets/uri_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compose_open"
+path = "fuzz_targets/compose_open.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "buffered_model"
+path = "fuzz_targets/buffered_model.rs"
+test = false
+doc = false

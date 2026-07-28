@@ -89,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/` — libFuzzer harness (cargo-fuzz layout) with three targets:
+  `uri_parse` (the grammar layer on raw attacker bytes: no panic,
+  `parse(format(x)) == x` fixpoint, canonical byte-identical
+  round-trip, typed-constructor agreement, `data:` open/parse byte
+  agreement), `compose_open` (fuzzer-built nested
+  `slice:`/`concat:`/`data:` compositions — in-memory only — opened
+  and driven with random read/seek op streams in lockstep with a
+  `Cursor<Vec<u8>>` model, plus out-of-range-window rejection probes),
+  and `buffered_model` (fuzzer-chosen capacity / block-size / lookback
+  tunables, payloads larger than any clampable ring, random op stream
+  against the model). First campaigns found the two fixes above
+  (`concat:` leading-`//` round-trip breakage and the `BufferedSource`
+  full-ring deadlock); post-fix campaigns are clean (30.8 M / 4.5 M /
+  0.5 M runs respectively in 5-minute bounded runs).
 - `FileScope` symlink-escape hardening suite
   (`tests/scope.rs::symlink_escapes`, Unix): pins the
   canonicalise-first contract with real symlinks — a link inside the
