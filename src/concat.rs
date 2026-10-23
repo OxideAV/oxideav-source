@@ -594,8 +594,8 @@ mod tests {
         // composite address space behaves regardless of underlying scheme.
         mem::put("concat-r184-mix", b"MID".to_vec());
         let head = temp_file(b"HEAD"); // 4 bytes, offsets 0..4
-                                       // mem        : 3 bytes, offsets 4..7
-                                       // data:,TAIL : 4 bytes, offsets 7..11
+        // mem        : 3 bytes, offsets 4..7
+        // data:,TAIL : 4 bytes, offsets 7..11
         let uri = format!("concat:{}|mem://concat-r184-mix|data:,TAIL", head.display());
         let mut r = open_concat(&uri).unwrap();
         let total = r.seek(SeekFrom::End(0)).unwrap();

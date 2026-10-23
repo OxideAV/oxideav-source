@@ -76,14 +76,14 @@ fn data_uri_percent(payload: &[u8]) -> String {
 fn data_uri_base64(payload: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::from("data:;base64,");
-    let mut chunks = payload.chunks_exact(3);
-    for c in &mut chunks {
+    let (chunks, remainder) = payload.as_chunks::<3>();
+    for c in chunks {
         let t = (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]);
         for shift in [18u32, 12, 6, 0] {
             out.push(ALPHA[((t >> shift) & 0x3f) as usize] as char);
         }
     }
-    match chunks.remainder() {
+    match remainder {
         [] => {}
         [b0] => {
             let t = u32::from(*b0) << 16;
@@ -192,7 +192,7 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(got, want, "read({n}) bytes diverge on {uri}");
             }
             4 => {
-                let target = if sc.u8() % 16 == 0 {
+                let target = if sc.u8().is_multiple_of(16) {
                     u64::MAX - u64::from(sc.u8() % 4)
                 } else {
                     sc.below(len * 2 + 16)

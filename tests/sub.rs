@@ -4,7 +4,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use oxideav_source::{with_defaults, SourceOutput, SubSource};
+use oxideav_source::{SourceOutput, SubSource, with_defaults};
 
 fn temp_file(bytes: &[u8]) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};

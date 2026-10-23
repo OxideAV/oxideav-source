@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - Error taxonomy aligned with the core `Error` contract (was:
   everything `InvalidData`). A well-formed `mem://` URI whose buffer
   isn't registered now returns `Io(NotFound)` — the same shape as a

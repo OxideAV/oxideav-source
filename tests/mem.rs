@@ -2,7 +2,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use oxideav_source::{mem, BytesSource, SourceOutput, SourceRegistry};
+use oxideav_source::{BytesSource, SourceOutput, SourceRegistry, mem};
 
 fn open_bytes(reg: &SourceRegistry, uri: &str) -> Box<dyn BytesSource> {
     match reg.open(uri).expect("open") {

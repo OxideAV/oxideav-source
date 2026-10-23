@@ -27,7 +27,7 @@ use std::io::Read;
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_source::{
-    open_data, parse_concat_uri, parse_data_uri, parse_slice_uri, ConcatUri, DataUri, SliceUri,
+    ConcatUri, DataUri, SliceUri, open_data, parse_concat_uri, parse_data_uri, parse_slice_uri,
 };
 
 fn check_slice(s: &str) {
@@ -39,10 +39,10 @@ fn check_slice(s: &str) {
     let again = parse_slice_uri(&formatted).expect("slice: format must re-parse");
     assert_eq!(again, parsed, "slice: parse-format-parse fixpoint");
     // Canonical inputs round-trip byte-identically.
-    if let Some(rest) = s.strip_prefix("slice:") {
-        if !rest.starts_with("//") {
-            assert_eq!(formatted, s, "slice: canonical round-trip");
-        }
+    if let Some(rest) = s.strip_prefix("slice:")
+        && !rest.starts_with("//")
+    {
+        assert_eq!(formatted, s, "slice: canonical round-trip");
     }
     // Constructor agreement (the parser can hand back an inner with a
     // nested '!', which the strict constructor rejects by design).
@@ -60,10 +60,10 @@ fn check_concat(s: &str) {
     let formatted = parsed.format();
     let again = parse_concat_uri(&formatted).expect("concat: format must re-parse");
     assert_eq!(again, parsed, "concat: parse-format-parse fixpoint");
-    if let Some(rest) = s.strip_prefix("concat:") {
-        if !rest.starts_with("//") {
-            assert_eq!(formatted, s, "concat: canonical round-trip");
-        }
+    if let Some(rest) = s.strip_prefix("concat:")
+        && !rest.starts_with("//")
+    {
+        assert_eq!(formatted, s, "concat: canonical round-trip");
     }
     // The parser guarantees non-empty, '|'-free segments — exactly the
     // constructor's preconditions.

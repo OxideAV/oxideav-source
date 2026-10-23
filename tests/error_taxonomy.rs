@@ -17,7 +17,7 @@
 use std::io::ErrorKind;
 
 use oxideav_core::Error;
-use oxideav_source::{open_bytes, open_data, open_file, open_mem, open_slice, FileScope};
+use oxideav_source::{FileScope, open_bytes, open_data, open_file, open_mem, open_slice};
 
 fn kind_of(e: &Error) -> Option<ErrorKind> {
     match e {

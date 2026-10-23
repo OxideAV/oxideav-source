@@ -23,7 +23,7 @@
 
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
-use oxideav_source::{mem, open_bytes, BufferedSource, BytesSource, SubSource};
+use oxideav_source::{BufferedSource, BytesSource, SubSource, mem, open_bytes};
 
 fn temp_file(bytes: &[u8]) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};

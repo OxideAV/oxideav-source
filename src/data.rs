@@ -168,14 +168,14 @@ fn ends_with_base64_marker(mediatype: &str) -> bool {
 /// Append RFC 4648 §4 base64 (standard alphabet, padded) to `out`.
 fn encode_base64_into(payload: &[u8], out: &mut String) {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut chunks = payload.chunks_exact(3);
-    for c in &mut chunks {
+    let (chunks, remainder) = payload.as_chunks::<3>();
+    for c in chunks {
         let t = (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]);
         for shift in [18u32, 12, 6, 0] {
             out.push(ALPHA[((t >> shift) & 0x3f) as usize] as char);
         }
     }
-    match chunks.remainder() {
+    match remainder {
         [] => {}
         [b0] => {
             let t = u32::from(*b0) << 16;
@@ -288,7 +288,7 @@ fn decode_base64(s: &str) -> Result<Vec<u8>> {
         }
         clean.push(b);
     }
-    if clean.len() % 4 != 0 {
+    if !clean.len().is_multiple_of(4) {
         return Err(Error::invalid(format!(
             "data:// base64 payload length {} is not a multiple of 4",
             clean.len()

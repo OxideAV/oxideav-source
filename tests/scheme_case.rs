@@ -11,8 +11,8 @@
 use std::io::{Read, Write};
 
 use oxideav_source::{
-    mem, open_concat, open_data, open_file, open_mem, open_slice, with_defaults, FileScope,
-    SourceOutput,
+    FileScope, SourceOutput, mem, open_concat, open_data, open_file, open_mem, open_slice,
+    with_defaults,
 };
 
 fn temp_file(bytes: &[u8]) -> std::path::PathBuf {

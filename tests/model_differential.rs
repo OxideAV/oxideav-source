@@ -12,7 +12,7 @@
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use oxideav_source::{mem, open_bytes, BufferedSource, BytesSource, SubSource};
+use oxideav_source::{BufferedSource, BytesSource, SubSource, mem, open_bytes};
 
 // ───────────────────────── deterministic PRNG ─────────────────────────
 

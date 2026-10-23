@@ -7,9 +7,9 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_source::{mem, open_bytes, parse_data_uri, parse_slice_uri, BufferedSource};
+use oxideav_source::{BufferedSource, mem, open_bytes, parse_data_uri, parse_slice_uri};
 
 fn ramp(n: usize) -> Vec<u8> {
     (0..n).map(|i| (i % 251) as u8).collect()

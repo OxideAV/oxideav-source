@@ -99,7 +99,7 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(got, want, "read({k}) bytes diverge");
             }
             4 => {
-                let target = if sc.u8() % 16 == 0 {
+                let target = if sc.u8().is_multiple_of(16) {
                     u64::MAX - u64::from(sc.u8() % 4)
                 } else {
                     sc.below(len * 2 + 16)

@@ -355,8 +355,8 @@ fn prefetch_timeout_surfaces_when_worker_stalls() {
     // A reader whose inner source blocks forever should hit the
     // configured prefetch timeout instead of hanging indefinitely.
     use std::io::Read as _;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     /// A reader whose `read` blocks until a stop flag flips. Used to
@@ -552,7 +552,7 @@ fn interrupted_reads_are_retried_not_fatal() {
     }
     impl Read for Interrupting {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.hiccups > 0 && self.pos % 3 == 0 && self.pos < self.data.len() as u64 {
+            if self.hiccups > 0 && self.pos.is_multiple_of(3) && self.pos < self.data.len() as u64 {
                 self.hiccups -= 1;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,

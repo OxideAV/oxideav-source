@@ -56,13 +56,13 @@ pub use buffered::{
     BufferedSource, BufferedSourceBuilder, DEFAULT_BLOCK, DEFAULT_LOOKBACK_DEN,
     DEFAULT_LOOKBACK_NUM, DEFAULT_PREFETCH_TIMEOUT,
 };
-pub use concat::{open_concat, parse as parse_concat_uri, ConcatUri};
-pub use data::{open_data, parse as parse_data_uri, DataUri};
+pub use concat::{ConcatUri, open_concat, parse as parse_concat_uri};
+pub use data::{DataUri, open_data, parse as parse_data_uri};
 pub use file::open_file;
 pub use mem::open_mem;
-pub use scope::{open_file_scoped, FileScope};
-pub use slice::{open_slice, parse as parse_slice_uri, SliceUri};
-pub use sub::{stream_len, SubSource};
+pub use scope::{FileScope, open_file_scoped};
+pub use slice::{SliceUri, open_slice, parse as parse_slice_uri};
+pub use sub::{SubSource, stream_len};
 
 /// Open a URI with the bundled in-process drivers, without constructing
 /// a [`SourceRegistry`]. Dispatches on the URI scheme
