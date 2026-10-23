@@ -245,7 +245,7 @@ container, and filter crates are implemented from the spec (no C codec
 libraries linked or wrapped, no `*-sys` crates). Optional
 hardware-engine crates (`oxideav-videotoolbox` / `-audiotoolbox` /
 `-vaapi` / `-vdpau` / `-nvidia` / `-vulkan-video`) bridge to OS APIs via
-runtime `libloading`; pass `--no-hwaccel` (or omit the `hwaccel`
+runtime `dlsym`; pass `--no-hwaccel` (or omit the `hwaccel`
 feature) to opt out.
 
 ## Usage
