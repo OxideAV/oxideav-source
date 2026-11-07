@@ -225,6 +225,7 @@ fn open_segment(seg: &str) -> Result<Box<dyn BytesSource>> {
 /// / `concat://` spellings normalise to the canonical form.
 /// `parse(format(x)) == x` holds for every accepted input.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConcatUri {
     /// Segment URIs in concatenation order. Each is any scheme
     /// [`open_concat`] accepts as a segment (`file://` / bare path,

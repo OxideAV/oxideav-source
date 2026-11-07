@@ -84,6 +84,7 @@ use crate::uri;
 /// for them `parse → format` is a normalisation rather than an
 /// identity. `parse(format(x)) == x` holds for every accepted input.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SliceUri {
     /// Absolute byte offset within the inner source at which the window
     /// starts.

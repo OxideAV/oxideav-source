@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- API hygiene: `ConcatUri` and `SliceUri` are now `#[non_exhaustive]`; build them with their existing validating `new` constructors. `DataUri` (the fixed RFC 2397 grammar) stays exhaustive.
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-source/compare/v0.1.5...v0.1.6) - 2026-10-23
 
 ### Other
